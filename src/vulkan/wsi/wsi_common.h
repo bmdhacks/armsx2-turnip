@@ -181,6 +181,11 @@ struct wsi_device {
    struct {
       /* Don't use the commit-timing protocol for pacing */
       bool disable_timestamps;
+
+      /* Output transform (90, 180 or 270) to pre-rotate presents for,
+       * 0 if off. Needs VK_QCOM_rotated_copy_commands.
+       */
+      uint32_t prerotate_degrees;
    } wayland;
 
    /*

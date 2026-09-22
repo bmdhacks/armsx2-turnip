@@ -71,6 +71,11 @@ struct wsi_drm_image_params {
    uint32_t num_modifier_lists;
    const uint32_t *num_modifiers;
    const uint64_t *const *modifiers;
+
+   /* blit each present into a rotated copy (VK_QCOM_rotated_copy_commands) */
+   bool prerotate;
+   VkExtent2D prerotate_extent;
+   VkSurfaceTransformFlagBitsKHR prerotate_transform;
 };
 
 struct wsi_dxgi_image_params {
@@ -83,6 +88,12 @@ typedef uint32_t (*wsi_memory_type_select_cb)(const struct wsi_device *wsi,
 
 struct wsi_image_info {
    VkImageCreateInfo create;
+
+   bool prerotate;
+   VkExtent2D prerotate_extent;
+   VkSurfaceTransformFlagBitsKHR prerotate_transform;
+   VkImageCreateInfo prerotate_create;
+   struct wsi_image_create_info prerotate_wsi;
    struct wsi_image_create_info wsi;
    VkImageUsageFlags2CreateInfoKHR usage2;
    VkExternalMemoryImageCreateInfo ext_mem;
