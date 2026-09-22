@@ -410,6 +410,8 @@ def add_common_vk_wsi_options(debug_options, performance_options, defaults=None)
           "Force the X11 WSI to create at least the number of image specified by the driver in VkSurfaceCapabilitiesKHR::minImageCount"),
         B("vk_google_display_timing", defaults.get("vk_google_display_timing", False),
           "Expose VK_GOOGLE_display_timing even if fully conformant support can't be guaranteed on all enabled surface types, e.g., (X)Wayland"),
+        I("vk_wsi_wayland_prerotate", defaults.get("vk_wsi_wayland_prerotate", 0), 0, 270,
+          "Pre-rotate Wayland presents for an output with this wl_output transform (90, 180 or 270), so the compositor does not have to rotate them. Needs VK_QCOM_rotated_copy_commands. 0 disables it."),
     ])
 
     debug_options.extend([

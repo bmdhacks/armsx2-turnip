@@ -214,6 +214,8 @@ struct wsi_wl_swapchain {
    enum wsi_wl_buffer_type buffer_type;
 
    enum wl_output_transform buffer_transform;
+   bool prerotate;
+   VkExtent2D present_extent;
    uint32_t drm_format;
    enum wl_shm_format shm_format;
 
@@ -3722,10 +3724,11 @@ wsi_wl_image_init(struct wsi_wl_swapchain *chain,
                                         image->base.drm_modifier & 0xffffffff);
       }
 
+      const VkExtent2D buffer_extent = chain->prerotate ? chain->present_extent : chain->extent;
       struct wl_buffer *buffer =
          zwp_linux_buffer_params_v1_create_immed(params,
-                                                 chain->extent.width,
-                                                 chain->extent.height,
+                                                 buffer_extent.width,
+                                                 buffer_extent.height,
                                                  chain->drm_format,
                                                  0);
       zwp_linux_buffer_params_v1_destroy(params);
@@ -4025,6 +4028,42 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       buffer_type = WSI_WL_BUFFER_NATIVE;
       image_params = &drm_image_params.base;
    }
+
+#ifdef HAVE_LIBDRM
+   /* the rotated copy replaces the native image, not a PRIME buffer */
+   if (buffer_type == WSI_WL_BUFFER_NATIVE && wsi_device->wayland.prerotate_degrees &&
+       pCreateInfo->preTransform == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR &&
+       !wsi_drm_image_needs_buffer_blit(wsi_device, &drm_image_params) &&
+       wl_proxy_get_version((struct wl_proxy *)wsi_wl_surface->base.surface) >=
+          WL_SURFACE_SET_BUFFER_TRANSFORM_SINCE_VERSION) {
+      /* rotate so the buffer transform matches the output transform */
+      VkSurfaceTransformFlagBitsKHR transform;
+      switch (wsi_device->wayland.prerotate_degrees) {
+      case 90:
+         transform = VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
+         break;
+      case 180:
+         transform = VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR;
+         break;
+      case 270:
+         transform = VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR;
+         break;
+      default:
+         transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+         break;
+      }
+      if (transform != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
+         chain->prerotate = true;
+         chain->buffer_transform = wsi_wl_transform_from_vk(transform);
+         chain->present_extent = transform == VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR
+            ? pCreateInfo->imageExtent
+            : (VkExtent2D) { pCreateInfo->imageExtent.height, pCreateInfo->imageExtent.width };
+         drm_image_params.prerotate = true;
+         drm_image_params.prerotate_extent = chain->present_extent;
+         drm_image_params.prerotate_transform = transform;
+      }
+   }
+#endif
 
    result = wsi_swapchain_init(wsi_device, &chain->base, device,
                                pCreateInfo, image_params, pAllocator);

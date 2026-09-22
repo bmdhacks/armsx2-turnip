@@ -314,6 +314,12 @@ wsi_device_init(struct wsi_device *wsi,
             driQueryOptionb(dri_options, "vk_wsi_disable_unordered_submits");
       }
 
+      if (driCheckOption(dri_options, "vk_wsi_wayland_prerotate", DRI_INT) &&
+          supported_extensions->QCOM_rotated_copy_commands && wsi->CmdBlitImage2) {
+         wsi->wayland.prerotate_degrees =
+            driQueryOptioni(dri_options, "vk_wsi_wayland_prerotate");
+      }
+
    }
 
    /* can_present_on_device is a function pointer used to determine if images
@@ -420,6 +426,8 @@ get_blit_type(const struct wsi_device *wsi,
    case WSI_IMAGE_TYPE_DRM: {
       const struct wsi_drm_image_params *drm_params =
          container_of(params, const struct wsi_drm_image_params, base);
+      if (drm_params->prerotate)
+         return WSI_SWAPCHAIN_IMAGE_BLIT;
       return wsi_drm_image_needs_buffer_blit(wsi, drm_params) ?
          WSI_SWAPCHAIN_BUFFER_BLIT : WSI_SWAPCHAIN_NO_BLIT;
    }
@@ -3322,7 +3330,7 @@ wsi_cmd_blit_image_to_image(VkCommandBuffer cmd_buffer,
                             const struct wsi_image_info *info,
                             struct wsi_image *image)
 {
-   assert(info->image_type == WSI_IMAGE_TYPE_DXGI);
+   assert(info->image_type == WSI_IMAGE_TYPE_DXGI || info->prerotate);
 
    VkImageMemoryBarrier img_mem_barriers[2] = {
       {
@@ -3362,6 +3370,8 @@ wsi_cmd_blit_image_to_image(VkCommandBuffer cmd_buffer,
          },
       },
    };
+   if (info->prerotate)
+      img_mem_barriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
    wsi->CmdPipelineBarrier(cmd_buffer,
                            VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                            VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -3387,12 +3397,40 @@ wsi_cmd_blit_image_to_image(VkCommandBuffer cmd_buffer,
       .dstOffset = { .x = 0, .y = 0, .z = 0 },
       .extent = info->create.extent,
    };
-   wsi->CmdCopyImage(cmd_buffer,
-                     image->image,
-                     VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                     image->blit.image,
-                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                     1, &image_copy);
+   if (info->prerotate) {
+      const VkCopyCommandTransformInfoQCOM transform_info = {
+         .sType = VK_STRUCTURE_TYPE_COPY_COMMAND_TRANSFORM_INFO_QCOM,
+         .transform = info->prerotate_transform,
+      };
+      const VkImageBlit2 region = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_BLIT_2,
+         .pNext = info->prerotate_transform != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR ? &transform_info : NULL,
+         .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+         .srcOffsets = { { 0, 0, 0 },
+                         { (int32_t) info->create.extent.width, (int32_t) info->create.extent.height, 1 } },
+         .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
+         .dstOffsets = { { 0, 0, 0 },
+                         { (int32_t) info->prerotate_extent.width, (int32_t) info->prerotate_extent.height, 1 } },
+      };
+      const VkBlitImageInfo2 blit_info = {
+         .sType = VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2,
+         .srcImage = image->image,
+         .srcImageLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+         .dstImage = image->blit.image,
+         .dstImageLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+         .regionCount = 1,
+         .pRegions = &region,
+         .filter = VK_FILTER_NEAREST,
+      };
+      wsi->CmdBlitImage2(cmd_buffer, &blit_info);
+   } else {
+      wsi->CmdCopyImage(cmd_buffer,
+                        image->image,
+                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                        image->blit.image,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        1, &image_copy);
+   }
 
    img_mem_barriers[0].srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
    img_mem_barriers[0].dstAccessMask = 0;

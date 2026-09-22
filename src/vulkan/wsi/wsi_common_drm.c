@@ -922,6 +922,86 @@ wsi_drm_image_needs_buffer_blit(const struct wsi_device *wsi,
    return true;
 }
 
+static VkResult
+wsi_create_prerotate_image_mem(const struct wsi_swapchain *chain,
+                               const struct wsi_image_info *info,
+                               struct wsi_image *image)
+{
+   const struct wsi_device *wsi = chain->wsi;
+   VkResult result;
+
+   VkMemoryRequirements reqs;
+   wsi->GetImageMemoryRequirements(chain->device, image->image, &reqs);
+   const VkMemoryDedicatedAllocateInfo dedicated_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+      .image = image->image,
+   };
+   const VkMemoryAllocateInfo memory_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .pNext = &dedicated_info,
+      .allocationSize = reqs.size,
+      .memoryTypeIndex = wsi_select_device_memory_type(wsi, reqs.memoryTypeBits),
+   };
+   result = wsi->AllocateMemory(chain->device, &memory_info, &chain->alloc, &image->memory);
+   if (result != VK_SUCCESS)
+      return result;
+
+   result = wsi->CreateImage(chain->device, &info->prerotate_create, &chain->alloc, &image->blit.image);
+   if (result != VK_SUCCESS)
+      return result;
+
+   VkImage app_image = image->image;
+   VkDeviceMemory app_memory = image->memory;
+   image->image = image->blit.image;
+   image->memory = VK_NULL_HANDLE;
+   result = wsi_create_native_image_mem(chain, info, image);
+   if (result == VK_SUCCESS)
+      result = wsi->BindImageMemory(chain->device, image->image, image->memory, 0);
+   image->blit.memory = image->memory;
+   image->image = app_image;
+   image->memory = app_memory;
+   return result;
+}
+
+static VkResult
+wsi_configure_prerotate_image(const struct wsi_swapchain *chain,
+                              const VkSwapchainCreateInfoKHR *pCreateInfo,
+                              const struct wsi_drm_image_params *params,
+                              struct wsi_image_info *info)
+{
+   VkResult result = wsi_configure_native_image(chain, pCreateInfo, params, info);
+   if (result != VK_SUCCESS)
+      return result;
+
+   info->prerotate = true;
+   info->prerotate_extent = params->prerotate_extent;
+   info->prerotate_transform = params->prerotate_transform;
+
+   /* the exported copy is only a blit destination, it takes the external
+    * memory, WSI and modifier structs from the native chain
+    */
+   info->prerotate_create = info->create;
+   info->prerotate_create.pNext = &info->ext_mem;
+   info->prerotate_create.flags &= ~(VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT |
+                                     VK_IMAGE_CREATE_EXTENDED_USAGE_BIT);
+   info->prerotate_create.extent = (VkExtent3D) { params->prerotate_extent.width, params->prerotate_extent.height, 1 };
+   info->prerotate_create.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                                  (info->create.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+   info->prerotate_wsi = info->wsi;
+   info->prerotate_wsi.pNext = info->drm_mod_list.drmFormatModifierCount > 0 ? &info->drm_mod_list : NULL;
+
+   /* the app renders here, not exported, and keeps the rest of the chain */
+   assert(info->create.pNext == &info->ext_mem);
+   info->create.pNext = info->ext_mem.pNext;
+   info->ext_mem.pNext = &info->prerotate_wsi;
+   info->usage2.pNext = NULL;
+   info->wsi.scanout = false;
+   info->create.tiling = VK_IMAGE_TILING_OPTIMAL;
+   wsi_configure_image_blit_image(chain, info);
+   info->create_mem = wsi_create_prerotate_image_mem;
+   return VK_SUCCESS;
+}
+
 VkResult
 wsi_drm_configure_image(const struct wsi_swapchain *chain,
                         const VkSwapchainCreateInfoKHR *pCreateInfo,
@@ -930,7 +1010,9 @@ wsi_drm_configure_image(const struct wsi_swapchain *chain,
 {
    assert(params->base.image_type == WSI_IMAGE_TYPE_DRM);
 
-   if (chain->blit.type == WSI_SWAPCHAIN_BUFFER_BLIT) {
+   if (chain->blit.type == WSI_SWAPCHAIN_IMAGE_BLIT) {
+      return wsi_configure_prerotate_image(chain, pCreateInfo, params, info);
+   } else if (chain->blit.type == WSI_SWAPCHAIN_BUFFER_BLIT) {
       return wsi_configure_prime_image(chain, pCreateInfo,
                                        params,
                                        info);
