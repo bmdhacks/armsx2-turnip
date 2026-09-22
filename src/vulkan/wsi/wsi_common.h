@@ -219,6 +219,7 @@ struct wsi_device {
    WSI_CB(BeginCommandBuffer);
    WSI_CB(CmdPipelineBarrier);
    WSI_CB(CmdCopyImage);
+   WSI_CB(CmdBlitImage2);
    WSI_CB(CmdCopyImageToBuffer);
    WSI_CB(CmdResetQueryPool);
    WSI_CB(ResetQueryPoolEXT);

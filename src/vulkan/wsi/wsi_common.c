@@ -194,6 +194,7 @@ wsi_device_init(struct wsi_device *wsi,
    WSI_GET_CB(BeginCommandBuffer);
    WSI_GET_CB(CmdPipelineBarrier);
    WSI_GET_CB(CmdCopyImage);
+   WSI_GET_CB(CmdBlitImage2);
    WSI_GET_CB(CmdCopyImageToBuffer);
    WSI_GET_CB(CmdResetQueryPool);
    WSI_GET_CB(ResetQueryPoolEXT);
