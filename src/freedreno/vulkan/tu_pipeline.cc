@@ -3770,6 +3770,29 @@ tu6_emit_prim_mode_sysmem(struct tu_cs *cs,
    if (sysmem_prim_mode == FLUSH_PER_OVERLAP_AND_OVERWRITE)
       *sysmem_single_prim_mode = true;
 
+   /* ARMSX2 pack change, not upstream. a6xx only: a7xx and later pick the prim
+    * mode differently and we have measured nothing there.
+    *
+    * Emit FLUSH_PER_OVERLAP instead. Measured on an Adreno 650 against this
+    * Mesa, paired with the per-draw flush in tu6_draw_common: 587 captured
+    * frames, none differing by a byte from stock plus application barriers, and
+    * 2.0-2.9x faster where the self-read is what the frame costs (Splashdown at
+    * native, 54.7 ms -> 22.4 ms). The weaker mode is equally clean under an
+    * application that does issue the barriers itself.
+    *
+    * Why the weaker mode suffices is not understood. Per the comment above,
+    * mode 1's extra job is keeping the UBWC data and flag buffers in step, and
+    * our colour targets are UBWC, so that hazard is live and this does not
+    * address it. What we have is 587 reps that never hit it, from shaders that
+    * read and write whole pixels. A shader writing some components and reading
+    * others is the case to watch.
+    *
+    * sysmem_single_prim_mode above keeps the stock value on purpose: it feeds
+    * render-mode selection and the autotuner, not this register.
+    */
+   if (CHIP == A6XX && sysmem_prim_mode == FLUSH_PER_OVERLAP_AND_OVERWRITE)
+      sysmem_prim_mode = FLUSH_PER_OVERLAP;
+
    tu_cs_emit_regs(cs, GRAS_SC_CNTL(CHIP,
       .single_prim_mode = sysmem_prim_mode,
       .ccusinglecachelinesize = 2,
