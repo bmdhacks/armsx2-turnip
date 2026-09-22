@@ -8658,6 +8658,38 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
    if (cmd->state.dirty & TU_CMD_DIRTY_FS)
       tu_flush_dynamic_input_attachments<CHIP>(cmd);
 
+   /* ARMSX2 pack change, not upstream. a6xx only, for the same reason.
+    *
+    * Give a feedback-loop draw the flush a colour-write-to-fragment-read
+    * barrier would have produced, whether or not the application issued one.
+    * On an Adreno 650 it costs 0.1-1.1 ms per frame, and paired with the weaker
+    * prim mode above it is what holds the picture byte-identical.
+    *
+    * The three terms are the ones tu6_emit_prim_mode_sysmem tests, read out of
+    * command buffer state instead of pipeline state: rasterization-order
+    * attachment access, a feedback loop from either the pipeline create flag or
+    * vkCmdSetAttachmentFeedbackLoopEnableEXT, and a dynamic-renderpass input
+    * attachment. TU_DEBUG(RAST_ORDER) is deliberately not folded in.
+    *
+    * Not restricted to sysmem, because sysmem is not knowable here: the render
+    * mode is chosen at pass end by use_sysmem_rendering(), and this command
+    * stream is replayed per tile in gmem. A declared feedback loop sets
+    * rp.disable_gmem, so those draws are always sysmem; what remains is a
+    * conservative extra flush on rasterization-order and input-attachment draws
+    * in gmem, where the gmem prim mode and the per-subpass invalidate already
+    * cover coherency.
+    */
+   if (CHIP == A6XX &&
+       (cmd->state.raster_order_attachment_access ||
+        (cmd->vk.dynamic_graphics_state.feedback_loops |
+         cmd->state.pipeline_feedback_loops) != 0 ||
+        (cmd->state.shaders[MESA_SHADER_FRAGMENT] &&
+         cmd->state.shaders[MESA_SHADER_FRAGMENT]
+            ->fs.dynamic_input_attachments_used)))
+      cmd->state.renderpass_cache.flush_bits |=
+         TU_CMD_FLAG_CCU_CLEAN_COLOR | TU_CMD_FLAG_CACHE_INVALIDATE |
+         TU_CMD_FLAG_WAIT_FOR_IDLE;
+
    tu_emit_cache_flush_renderpass<CHIP>(cmd);
 
   if (BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
