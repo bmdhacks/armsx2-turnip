@@ -193,6 +193,9 @@ struct wsi_wl_surface {
    struct zwp_linux_dmabuf_feedback_v1 *wl_dmabuf_feedback;
    struct dmabuf_feedback dmabuf_feedback, pending_dmabuf_feedback;
    struct vk_instance *instance;
+
+   /* last wl_surface buffer transform sent */
+   enum wl_output_transform buffer_transform;
 };
 
 struct wsi_wl_swapchain {
@@ -209,6 +212,8 @@ struct wsi_wl_swapchain {
    VkExtent2D extent;
    VkFormat vk_format;
    enum wsi_wl_buffer_type buffer_type;
+
+   enum wl_output_transform buffer_transform;
    uint32_t drm_format;
    enum wl_shm_format shm_format;
 
@@ -1859,6 +1864,22 @@ wsi_wl_surface_get_min_image_count(struct wsi_wl_display *display,
    return display->fifo_manager ? WSI_WL_DEFAULT_NUM_IMAGES : WSI_WL_BUMPED_NUM_IMAGES;
 }
 
+/* Vulkan rotations are clockwise, wl_output ones counter-clockwise */
+static enum wl_output_transform
+wsi_wl_transform_from_vk(VkSurfaceTransformFlagBitsKHR transform)
+{
+   switch (transform) {
+   case VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR:
+      return WL_OUTPUT_TRANSFORM_270;
+   case VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR:
+      return WL_OUTPUT_TRANSFORM_180;
+   case VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR:
+      return WL_OUTPUT_TRANSFORM_90;
+   default:
+      return WL_OUTPUT_TRANSFORM_NORMAL;
+   }
+}
+
 static VkResult
 wsi_wl_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
                                 struct wsi_device *wsi_device,
@@ -1895,6 +1916,13 @@ wsi_wl_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
    };
 
    caps->surfaceCapabilities.supportedTransforms = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+   if (wl_proxy_get_version((struct wl_proxy *)surface->surface) >=
+       WL_SURFACE_SET_BUFFER_TRANSFORM_SINCE_VERSION) {
+      caps->surfaceCapabilities.supportedTransforms |=
+         VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR |
+         VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR |
+         VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
+   }
    caps->surfaceCapabilities.currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
    caps->surfaceCapabilities.maxImageArrayLayers = 1;
 
@@ -3425,6 +3453,14 @@ wsi_wl_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
    }
 
    assert(image_index < chain->base.image_count);
+   if (wsi_wl_surface->buffer_transform != chain->buffer_transform) {
+      wl_surface_set_buffer_transform(wsi_wl_surface->wayland_surface.wrapper,
+                                      chain->buffer_transform);
+      wsi_wl_surface->buffer_transform = chain->buffer_transform;
+   }
+   /* damage rects are not in the transformed buffer's coordinates */
+   if (chain->buffer_transform != WL_OUTPUT_TRANSFORM_NORMAL)
+      damage = NULL;
    wl_surface_attach(wsi_wl_surface->wayland_surface.wrapper,
                      chain->images[image_index].wayland_buffer.buffer, 0, 0);
 
@@ -3935,6 +3971,7 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
    VkPresentModeKHR present_mode = wsi_swapchain_get_present_mode(wsi_device, pCreateInfo);
 
    chain->color.colorspace = pCreateInfo->imageColorSpace;
+   chain->buffer_transform = wsi_wl_transform_from_vk(pCreateInfo->preTransform);
 
    enum wsi_wl_buffer_type buffer_type;
    struct wsi_base_image_params *image_params = NULL;
