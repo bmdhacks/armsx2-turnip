@@ -23,6 +23,12 @@
  */
 
 #include <wayland-client.h>
+/* A driver pack built on a host with libwayland >= 1.24 for a device that has
+ * 1.23 must not import wl_fixes_interface, or dlopen fails and the loader
+ * silently drops the ICD. The build passes -DWSI_WL_NO_FIXES for such targets. */
+#ifdef WSI_WL_NO_FIXES
+#undef WL_FIXES_INTERFACE
+#endif
 
 #include <assert.h>
 #include <stdlib.h>
