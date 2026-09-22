@@ -1,3 +1,12 @@
+ARMSX2 Turnip
+=============
+
+This is the `ARMSX2 <https://github.com/ARMSX2/ARMSX2>`__ fork of Mesa: upstream
+Mesa plus a short series of changes to Turnip, the Adreno Vulkan driver, carried
+in the driver packs the ARMSX2 Android app and ROCKNIX builds install. What the
+changes are, which branch is which, and how the packs are built and released is
+in `README.ARMSX2.md <README.ARMSX2.md>`__. Everything below is Mesa's own README.
+
 `Mesa <https://mesa3d.org>`_ - The 3D Graphics Library
 ======================================================
 
