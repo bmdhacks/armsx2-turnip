@@ -2183,6 +2183,54 @@ wsi_wl_surface_get_capabilities2(VkIcdSurfaceBase *surface,
    return result;
 }
 
+static int
+wsi_wl_format_rank(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_B8G8R8A8_UNORM:
+   case VK_FORMAT_R8G8B8A8_UNORM:
+   case VK_FORMAT_A8B8G8R8_UNORM_PACK32:
+      return 0;
+   case VK_FORMAT_B8G8R8A8_SRGB:
+   case VK_FORMAT_R8G8B8A8_SRGB:
+   case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+      return 1;
+   case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+   case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+      return 2;
+   case VK_FORMAT_R16G16B16A16_UNORM:
+      return 4;
+   case VK_FORMAT_R16G16B16A16_SFLOAT:
+      return 5;
+   default:
+      return 3;
+   }
+}
+
+static void
+wsi_wl_display_sort_formats(struct wsi_wl_display *display)
+{
+   /* u_vector pads elements to a power of two, so on 32-bit they are further
+    * apart than sizeof(struct wsi_wl_format)
+    */
+   char *base = u_vector_tail(&display->formats);
+   const size_t stride = display->formats.element_size;
+   const uint32_t count = u_vector_length(&display->formats);
+   /* stable, so formats of the same rank keep the compositor's order */
+   for (uint32_t i = 1; i < count; i++) {
+      struct wsi_wl_format key = *(struct wsi_wl_format *)(base + i * stride);
+      const int rank = wsi_wl_format_rank(key.vk_format);
+      uint32_t j = i;
+      for (; j > 0; j--) {
+         struct wsi_wl_format *prev = (struct wsi_wl_format *)(base + (j - 1) * stride);
+         if (wsi_wl_format_rank(prev->vk_format) <= rank)
+            break;
+         *(struct wsi_wl_format *)(base + j * stride) = *prev;
+      }
+      *(struct wsi_wl_format *)(base + j * stride) = key;
+   }
+}
+
 static VkResult
 wsi_wl_surface_get_formats(VkIcdSurfaceBase *icd_surface,
                            struct wsi_device *wsi_device,
@@ -2199,6 +2247,7 @@ wsi_wl_surface_get_formats(VkIcdSurfaceBase *icd_surface,
    if (wsi_wl_display_init(wsi, &display, surface->display, true,
                            wsi_device->sw, "mesa formats query"))
       return VK_ERROR_SURFACE_LOST_KHR;
+   wsi_wl_display_sort_formats(&display);
 
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormatKHR, out,
                           pSurfaceFormats, pSurfaceFormatCount);
@@ -2244,6 +2293,7 @@ wsi_wl_surface_get_formats2(VkIcdSurfaceBase *icd_surface,
    if (wsi_wl_display_init(wsi, &display, surface->display, true,
                            wsi_device->sw, "mesa formats2 query"))
       return VK_ERROR_SURFACE_LOST_KHR;
+   wsi_wl_display_sort_formats(&display);
 
    VK_OUTARRAY_MAKE_TYPED(VkSurfaceFormat2KHR, out,
                           pSurfaceFormats, pSurfaceFormatCount);
