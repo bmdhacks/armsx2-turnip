@@ -2562,8 +2562,17 @@ surface_dmabuf_feedback_done(void *data,
    if (f && !sets_of_modifiers_are_the_same(u_vector_length(&f->modifiers),
                                             u_vector_tail(&f->modifiers),
                                             chain->num_drm_modifiers,
-                                            chain->drm_modifiers))
-      wsi_wl_surface->chain->suboptimal = true;
+                                            chain->drm_modifiers)) {
+      bool modifier_offered = false;
+      if (chain->prerotate && chain->base.image_count > 0) {
+         const uint64_t current_modifier = chain->images[0].base.drm_modifier;
+         const uint64_t *offered = u_vector_tail(&f->modifiers);
+         for (uint32_t i = 0; i < u_vector_length(&f->modifiers) && !modifier_offered; i++)
+            modifier_offered = offered[i] == current_modifier;
+      }
+      if (!modifier_offered)
+         wsi_wl_surface->chain->suboptimal = true;
+   }
 }
 
 static const struct zwp_linux_dmabuf_feedback_v1_listener
