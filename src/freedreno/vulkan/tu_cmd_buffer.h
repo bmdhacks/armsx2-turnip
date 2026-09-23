@@ -453,7 +453,16 @@ struct tu_cmd_state
 
    struct tu_shader *shaders[MESA_SHADER_STAGES];
 
-   struct tu_program_state program;
+   /* The bound graphics pipeline's program state. A pointer, not a copy:
+    * the struct is about 10 KB (per-stage const state and hashes), and
+    * copying it on every vkCmdBindPipeline was about half of the bind's CPU
+    * cost.
+    * Nothing writes through it (it is not const only because the draw
+    * tracepoint takes the stage hashes as char *), and the pipeline outlives any
+    * recording that has it bound (destroying it invalidates the command
+    * buffer).
+    */
+   struct tu_program_state *program;
 
    struct tu_render_pass_state rp;
 
