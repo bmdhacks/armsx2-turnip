@@ -1,5 +1,7 @@
 #include "vk_graphics_state.h"
 
+#include <math.h>
+
 #include "vk_alloc.h"
 #include "vk_command_buffer.h"
 #include "vk_common_entrypoints.h"
@@ -2183,6 +2185,26 @@ vk_dynamic_graphics_state_fill(struct vk_dynamic_graphics_state *dyn,
    }                                                              \
 } while(0)
 
+/* Byte equality for the small fixed-size substructures below, in 8-byte words so
+ * the compiler unrolls it inline instead of calling memcmp.
+ */
+static inline bool
+dyn_bytes_equal(const void *a, const void *b, size_t size)
+{
+   const uint8_t *pa = a, *pb = b;
+   uint64_t diff = 0;
+   size_t i = 0;
+   for (; i + 8 <= size; i += 8) {
+      uint64_t wa, wb;
+      memcpy(&wa, pa + i, 8);
+      memcpy(&wb, pb + i, 8);
+      diff |= wa ^ wb;
+   }
+   for (; i < size; i++)
+      diff |= pa[i] ^ pb[i];
+   return diff == 0;
+}
+
 void
 vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
                                const struct vk_dynamic_graphics_state *src)
@@ -2198,6 +2220,13 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
 
 #define COPY_IF_SET(STATE, state) \
    if (IS_SET_IN_SRC(STATE)) SET_DYN_VALUE(dst, STATE, state, src->state)
+
+   /* States src sets that dst does not.  The blocks below only set bits of
+    * their own states, so this stays accurate for each group when it is used.
+    */
+   BITSET_DECLARE(missing, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
+   for (uint32_t w = 0; w < ARRAY_SIZE(missing); w++)
+      missing[w] = src->set[w] & ~dst->set[w];
 
    if (IS_SET_IN_SRC(VI)) {
       assert(dst->vi != NULL);
@@ -2258,6 +2287,25 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
       COPY_ARRAY(DR_RECTANGLES, dr.rectangles, src->dr.rectangle_count);
    }
 
+   /* Pipelines bound back to back usually share their rasterization and
+    * stencil state, and those are most of this function's compares.  A group
+    * can be skipped when copying it would be a no-op: every state of it that
+    * src sets is already set in dst, and the substructure is byte-identical,
+    * so each per-member copy would find dst set and equal.  Differing padding
+    * or members no state covers only send the group down the normal path.
+    * NaN floats are excluded because NaN != NaN makes the normal path write
+    * and mark dirty even when the bits match.
+    */
+   const bool rs_unchanged =
+      !BITSET_TEST_RANGE(missing, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE,
+                         MESA_VK_DYNAMIC_RS_LINE_STIPPLE) &&
+      dyn_bytes_equal(&dst->rs, &src->rs, sizeof(src->rs)) &&
+      !isnan(src->rs.extra_primitive_overestimation_size) &&
+      !isnan(src->rs.depth_bias.constant_factor) &&
+      !isnan(src->rs.depth_bias.clamp) &&
+      !isnan(src->rs.depth_bias.slope_factor) &&
+      !isnan(src->rs.line.width);
+   if (!rs_unchanged) {
    COPY_IF_SET(RS_RASTERIZER_DISCARD_ENABLE, rs.rasterizer_discard_enable);
    COPY_IF_SET(RS_DEPTH_CLAMP_ENABLE, rs.depth_clamp_enable);
    COPY_IF_SET(RS_DEPTH_CLIP_ENABLE, rs.depth_clip_enable);
@@ -2281,6 +2329,7 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
    COPY_IF_SET(RS_LINE_STIPPLE_ENABLE, rs.line.stipple.enable);
    COPY_IF_SET(RS_LINE_STIPPLE, rs.line.stipple.factor);
    COPY_IF_SET(RS_LINE_STIPPLE, rs.line.stipple.pattern);
+   }
 
    COPY_IF_SET(FSR, fsr.fragment_size.width);
    COPY_IF_SET(FSR, fsr.fragment_size.height);
@@ -2313,6 +2362,12 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
       COPY_MEMBER(DS_DEPTH_BOUNDS_TEST_BOUNDS, ds.depth.bounds_test.max);
    }
 
+   const bool stencil_unchanged =
+      !BITSET_TEST_RANGE(missing, MESA_VK_DYNAMIC_DS_STENCIL_TEST_ENABLE,
+                         MESA_VK_DYNAMIC_DS_STENCIL_REFERENCE) &&
+      dyn_bytes_equal(&dst->ds.stencil, &src->ds.stencil,
+                      sizeof(src->ds.stencil));
+   if (!stencil_unchanged) {
    COPY_IF_SET(DS_STENCIL_TEST_ENABLE, ds.stencil.test_enable);
    if (IS_SET_IN_SRC(DS_STENCIL_OP)) {
       COPY_MEMBER(DS_STENCIL_OP, ds.stencil.front.op.fail);
@@ -2335,6 +2390,7 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
    if (IS_SET_IN_SRC(DS_STENCIL_REFERENCE)) {
       COPY_MEMBER(DS_STENCIL_REFERENCE, ds.stencil.front.reference);
       COPY_MEMBER(DS_STENCIL_REFERENCE, ds.stencil.back.reference);
+   }
    }
 
    COPY_IF_SET(CB_LOGIC_OP_ENABLE, cb.logic_op_enable);
