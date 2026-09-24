@@ -2221,13 +2221,16 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
 #define COPY_IF_SET(STATE, state) \
    if (IS_SET_IN_SRC(STATE)) SET_DYN_VALUE(dst, STATE, state, src->state)
 
-   /* States src sets that dst does not.  The blocks below only set bits of
-    * their own states, so this stays accurate for each group when it is used.
+   /* Pipelines bound back to back usually carry the same values for most of
+    * the states below, so most of this function's compares find nothing to
+    * do.  Where a group's bytes are identical in src and dst, the group is
+    * skipped: every per-member copy in it would write the value dst already
+    * holds, and the set and dirty bits it would have set for a state dst did
+    * not have yet are set by the loop at the end of this function anyway.
+    * Bytes that differ, padding included, only send a group down the normal
+    * path.  NaN floats are excluded, because NaN != NaN makes the normal path
+    * mark dirty even when the bits match.
     */
-   BITSET_DECLARE(missing, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
-   for (uint32_t w = 0; w < ARRAY_SIZE(missing); w++)
-      missing[w] = src->set[w] & ~dst->set[w];
-
    if (IS_SET_IN_SRC(VI)) {
       assert(dst->vi != NULL);
       COPY_MEMBER(VI, vi->bindings_valid);
@@ -2259,46 +2262,56 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
    COPY_IF_SET(TS_PATCH_CONTROL_POINTS, ts.patch_control_points);
    COPY_IF_SET(TS_DOMAIN_ORIGIN, ts.domain_origin);
 
-   COPY_IF_SET(VP_VIEWPORT_COUNT, vp.viewport_count);
+   /* The viewport and scissor arrays keep their own path: they are usually
+    * dynamic, so their contents differ between src and dst.
+    */
+   const bool vp_scalars_unchanged =
+      dst->vp.viewport_count == src->vp.viewport_count &&
+      dst->vp.scissor_count == src->vp.scissor_count &&
+      dst->vp.depth_clip_negative_one_to_one ==
+         src->vp.depth_clip_negative_one_to_one &&
+      dst->vp.depth_clamp_mode == src->vp.depth_clamp_mode &&
+      dyn_bytes_equal(&dst->vp.depth_clamp_range, &src->vp.depth_clamp_range,
+                      sizeof(src->vp.depth_clamp_range)) &&
+      !isnan(src->vp.depth_clamp_range.minDepthClamp) &&
+      !isnan(src->vp.depth_clamp_range.maxDepthClamp);
+
+   if (!vp_scalars_unchanged)
+      COPY_IF_SET(VP_VIEWPORT_COUNT, vp.viewport_count);
    if (IS_SET_IN_SRC(VP_VIEWPORTS)) {
       assert(IS_SET_IN_SRC(VP_VIEWPORT_COUNT));
       COPY_ARRAY(VP_VIEWPORTS, vp.viewports, src->vp.viewport_count);
    }
 
-   COPY_IF_SET(VP_SCISSOR_COUNT, vp.scissor_count);
+   if (!vp_scalars_unchanged)
+      COPY_IF_SET(VP_SCISSOR_COUNT, vp.scissor_count);
    if (IS_SET_IN_SRC(VP_SCISSORS)) {
       assert(IS_SET_IN_SRC(VP_SCISSOR_COUNT));
       COPY_ARRAY(VP_SCISSORS, vp.scissors, src->vp.scissor_count);
    }
 
-   COPY_IF_SET(VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE,
-               vp.depth_clip_negative_one_to_one);
+   if (!vp_scalars_unchanged)
+      COPY_IF_SET(VP_DEPTH_CLIP_NEGATIVE_ONE_TO_ONE,
+                  vp.depth_clip_negative_one_to_one);
 
-   if (IS_SET_IN_SRC(VP_DEPTH_CLAMP_RANGE)) {
+   if (!vp_scalars_unchanged && IS_SET_IN_SRC(VP_DEPTH_CLAMP_RANGE)) {
       COPY_MEMBER(VP_DEPTH_CLAMP_RANGE, vp.depth_clamp_mode);
       COPY_MEMBER(VP_DEPTH_CLAMP_RANGE, vp.depth_clamp_range.minDepthClamp);
       COPY_MEMBER(VP_DEPTH_CLAMP_RANGE, vp.depth_clamp_range.maxDepthClamp);
    }
 
+   const bool dr_unchanged =
+      dyn_bytes_equal(&dst->dr, &src->dr, sizeof(src->dr));
+   if (!dr_unchanged) {
    COPY_IF_SET(DR_ENABLE, dr.enable);
    COPY_IF_SET(DR_MODE, dr.mode);
    if (IS_SET_IN_SRC(DR_RECTANGLES)) {
       COPY_MEMBER(DR_RECTANGLES, dr.rectangle_count);
       COPY_ARRAY(DR_RECTANGLES, dr.rectangles, src->dr.rectangle_count);
    }
+   }
 
-   /* Pipelines bound back to back usually share their rasterization and
-    * stencil state, and those are most of this function's compares.  A group
-    * can be skipped when copying it would be a no-op: every state of it that
-    * src sets is already set in dst, and the substructure is byte-identical,
-    * so each per-member copy would find dst set and equal.  Differing padding
-    * or members no state covers only send the group down the normal path.
-    * NaN floats are excluded because NaN != NaN makes the normal path write
-    * and mark dirty even when the bits match.
-    */
    const bool rs_unchanged =
-      !BITSET_TEST_RANGE(missing, MESA_VK_DYNAMIC_RS_RASTERIZER_DISCARD_ENABLE,
-                         MESA_VK_DYNAMIC_RS_LINE_STIPPLE) &&
       dyn_bytes_equal(&dst->rs, &src->rs, sizeof(src->rs)) &&
       !isnan(src->rs.extra_primitive_overestimation_size) &&
       !isnan(src->rs.depth_bias.constant_factor) &&
@@ -2331,16 +2344,25 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
    COPY_IF_SET(RS_LINE_STIPPLE, rs.line.stipple.pattern);
    }
 
+   if (!dyn_bytes_equal(&dst->fsr, &src->fsr, sizeof(src->fsr))) {
    COPY_IF_SET(FSR, fsr.fragment_size.width);
    COPY_IF_SET(FSR, fsr.fragment_size.height);
    COPY_IF_SET(FSR, fsr.combiner_ops[0]);
    COPY_IF_SET(FSR, fsr.combiner_ops[1]);
+   }
 
+   /* Everything in ms before the sample locations pointer, which differs
+    * between src and dst by construction and keeps its own path.
+    */
+   if (!dyn_bytes_equal(&dst->ms, &src->ms,
+                        offsetof(struct vk_dynamic_graphics_state, ms.sample_locations) -
+                        offsetof(struct vk_dynamic_graphics_state, ms))) {
    COPY_IF_SET(MS_RASTERIZATION_SAMPLES, ms.rasterization_samples);
    COPY_IF_SET(MS_SAMPLE_MASK, ms.sample_mask);
    COPY_IF_SET(MS_ALPHA_TO_COVERAGE_ENABLE, ms.alpha_to_coverage_enable);
    COPY_IF_SET(MS_ALPHA_TO_ONE_ENABLE, ms.alpha_to_one_enable);
    COPY_IF_SET(MS_SAMPLE_LOCATIONS_ENABLE, ms.sample_locations_enable);
+   }
 
    if (IS_SET_IN_SRC(MS_SAMPLE_LOCATIONS)) {
       assert(dst->ms.sample_locations != NULL);
@@ -2363,8 +2385,6 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
    }
 
    const bool stencil_unchanged =
-      !BITSET_TEST_RANGE(missing, MESA_VK_DYNAMIC_DS_STENCIL_TEST_ENABLE,
-                         MESA_VK_DYNAMIC_DS_STENCIL_REFERENCE) &&
       dyn_bytes_equal(&dst->ds.stencil, &src->ds.stencil,
                       sizeof(src->ds.stencil));
    if (!stencil_unchanged) {
@@ -2435,7 +2455,8 @@ vk_dynamic_graphics_state_copy(struct vk_dynamic_graphics_state *dst,
 
    COPY_IF_SET(RP_ATTACHMENTS, rp.attachments);
 
-   if (IS_SET_IN_SRC(INPUT_ATTACHMENT_MAP)) {
+   if (IS_SET_IN_SRC(INPUT_ATTACHMENT_MAP) &&
+       !dyn_bytes_equal(&dst->ial, &src->ial, sizeof(src->ial))) {
       COPY_MEMBER(INPUT_ATTACHMENT_MAP, ial.color_attachment_count);
       COPY_ARRAY(INPUT_ATTACHMENT_MAP, ial.color_map,
                  MESA_VK_MAX_COLOR_ATTACHMENTS);
