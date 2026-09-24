@@ -2,7 +2,8 @@
 
 This is Mesa, with the changes [ARMSX2](https://github.com/ARMSX2/ARMSX2) — an
 ARM64 PlayStation 2 emulator — makes to **Turnip**, the open Vulkan driver for
-Qualcomm Adreno GPUs (`src/freedreno/vulkan/`). Nothing outside Turnip is touched.
+Qualcomm Adreno GPUs (`src/freedreno/vulkan/`). Outside Turnip there is one
+build switch in the Wayland window-system code, described below.
 
 The emulator's GS (graphics) renderer reads the render target it is drawing into,
 inside the render pass, on almost every frame of many games. How a driver makes
@@ -16,11 +17,12 @@ kind of change a downstream can make and an upstream should not.
 
 | Branch | Base | What |
 |---|---|---|
-| `armsx2/26.1.2` | Mesa tag `mesa-26.1.2` | The measured line. This is what the ARMSX2 ROCKNIX images and the Android driver pack for Adreno 6xx are built from. |
-| `armsx2/main` | upstream `main` at the commit named in the branch's first ARMSX2 commit | The same patches on a newer Mesa, for devices whose community driver is already on a newer series. |
+| `armsx2/main` | upstream Mesa `main`, rebased from time to time | The release line. Current packs are built from here. |
+| `armsx2/26.1.2` | Mesa tag `mesa-26.1.2` | The older line, kept for the records that were measured on it. Mesa before 26.2 hangs on some depth/stencil draws on Adreno 6xx, so ARMSX2 turns its stencil buffer off under it, which costs speed. |
 
 Each branch is the base plus a short series of ARMSX2 commits; `git log
-mesa-26.1.2..armsx2/26.1.2` lists exactly what changed. `main` in this
+mesa-26.1.2..armsx2/26.1.2` and `git log main..armsx2/main` list exactly what
+changed. `main` in this
 repository is the unmodified upstream mirror the fork was taken from.
 
 ## What the patches do
@@ -37,6 +39,18 @@ scenes where the self-read is what the frame costs. Adreno 7xx and later are
 untouched: they never emitted the prim-mode state and need the application's
 barriers, which ARMSX2 keeps.
 
+**Cheaper pipeline binds (`tu: point at the bound pipeline's program state instead
+of copying it`).** Every graphics `vkCmdBindPipeline` copied the pipeline's whole
+program state, about 10 KB, into the command buffer, though draws only read a few
+hundred bytes of it. The command buffer now points at the pipeline's copy. The GPU
+receives exactly the same commands. On an Adreno 650 this cut the emulator's GS
+thread time by about 9% in a game that switches pipelines 4,400 times a frame. It
+applies to Adreno 6xx and 7xx alike.
+
+**Wayland build switch (`wsi/wayland: let a build opt out of wl_fixes …`).** Lets
+the ARM Linux build target an older `libwayland` than the build host has. It changes
+nothing unless the build defines `WSI_WL_NO_FIXES`.
+
 ## How the emulator knows it is running one of these builds
 
 Every pack is built with `MESA_GIT_SHA1_OVERRIDE=<tag>`, so
@@ -49,7 +63,7 @@ correct driver that the emulator treats as stock.
 
 ## Releases
 
-Each GitHub release is one driver pack:
+Each GitHub release is one driver build, with up to two assets:
 
 - `turnip-<tag>-android.zip` — an [adrenotools](https://github.com/bylaws/libadrenotools)
   driver pack (`meta.json` + `libvulkan_freedreno.so`, plus our `MANIFEST.json`
@@ -87,8 +101,9 @@ entry point), with the same options every community Turnip pack uses:
 extensions behind an Android-CTS whitelist keyed by API level, and the emulator
 needs them. `-moutline-atomics` keeps one pack safe on ARMv8.0 Adreno 610 parts.
 `MESA_GIT_SHA1_OVERRIDE` supplies the tag described above. The ARM Linux builds use
-the equivalent non-Android option set: a headless build with no window-system
-platforms and the default (msm) kernel interface.
+the equivalent non-Android option set with the Wayland platform
+(`-Dplatforms=wayland`, built with `WSI_WL_NO_FIXES`) and the default (msm) kernel
+interface.
 
 ## Licence
 
