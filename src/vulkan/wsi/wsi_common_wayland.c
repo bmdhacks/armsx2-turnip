@@ -3464,7 +3464,11 @@ wsi_wl_swapchain_queue_present(struct wsi_swapchain *wsi_chain,
    }
 
    assert(image_index < chain->base.image_count);
-   if (wsi_wl_surface->buffer_transform != chain->buffer_transform) {
+   /* The app owns the wl_surface and can set its transform too (Qt does), so a
+    * rotated transform goes with every attach.
+    */
+   if (chain->buffer_transform != WL_OUTPUT_TRANSFORM_NORMAL ||
+       wsi_wl_surface->buffer_transform != chain->buffer_transform) {
       wl_surface_set_buffer_transform(wsi_wl_surface->wayland_surface.wrapper,
                                       chain->buffer_transform);
       wsi_wl_surface->buffer_transform = chain->buffer_transform;
