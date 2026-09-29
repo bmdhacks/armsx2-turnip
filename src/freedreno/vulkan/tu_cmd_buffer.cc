@@ -8686,6 +8686,33 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
     * in gmem, where the gmem prim mode and the per-subpass invalidate already
     * cover coherency.
     */
+   /* ARMSX2 pack change, not upstream. a7xx only.
+    *
+    * The a7xx half of the feedback-loop change above. A draw whose state
+    * declares an attachment feedback loop (the pipeline create flag or
+    * vkCmdSetAttachmentFeedbackLoopEnableEXT) gets the flush a
+    * colour-write-to-fragment-read barrier would have produced, so an
+    * application can drop the barrier it would otherwise issue before the
+    * draw. On an Adreno 740 the CCU clean and the wait for idle are both
+    * needed; without either, pictures differ from run to run.
+    *
+    * This orders the draw against earlier draws only. Overlapping primitives
+    * within the draw are ordered only if the pipeline asks for
+    * rasterization-order attachment access: stock a7xx then binds
+    * FLUSH_PER_OVERLAP in every render mode. That is left to the
+    * application because the per-overlap wait is expensive in sysmem (on an
+    * Adreno 740 it made a PS2 title whose feedback draws do not overlap
+    * 45% slower), and only the application knows which draws overlap.
+    *
+    * A declared loop disables gmem, so these draws run in sysmem.
+    */
+   if (CHIP == A7XX &&
+       (cmd->vk.dynamic_graphics_state.feedback_loops |
+        cmd->state.pipeline_feedback_loops) != 0)
+      cmd->state.renderpass_cache.flush_bits |=
+         TU_CMD_FLAG_CCU_CLEAN_COLOR | TU_CMD_FLAG_CACHE_INVALIDATE |
+         TU_CMD_FLAG_WAIT_FOR_IDLE;
+
    if (CHIP == A6XX &&
        (cmd->state.raster_order_attachment_access ||
         (cmd->vk.dynamic_graphics_state.feedback_loops |
