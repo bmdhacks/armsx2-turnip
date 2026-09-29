@@ -407,6 +407,9 @@ impl<A: AllocSSA> DstModProp<'_, A> {
                 self.fold_clamp(&op.dst, op.dst_type, &mut op.clamp)
                     | self.fold_to_f32(&mut op.dst, op.dst_type, op.round)
             }
+            Op::FmaRScale(op) => {
+                self.fold_clamp(&op.dst, DataType::F32, &mut op.clamp)
+            }
             Op::FMax(op) => {
                 self.fold_clamp(&op.dst, op.dst_type, &mut op.clamp)
             }

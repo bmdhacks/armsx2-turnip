@@ -284,6 +284,88 @@ impl<'a> ShaderFromNir<'a> {
         }
     }
 
+    /// If `src` is a 32-bit float constant equal to 2^n, returns n.
+    fn src_as_pow2_exp(src: &nir_alu_src) -> Option<i32> {
+        if src.bit_size() != 32 {
+            return None;
+        }
+        let bits = src.comp_as_uint(0)? as u32;
+        let exp = (bits >> 23) & 0xff;
+        // Positive, normal, zero mantissa
+        if bits >> 31 != 0 || bits & 0x7fffff != 0 || exp == 0 || exp == 0xff {
+            return None;
+        }
+        Some(exp as i32 - 127)
+    }
+
+    /// Matches a scalar fp32 fmul that multiplies two values and a power of
+    /// two, as either fmul(fmul(a, 2^n), b) or fmul(fmul(a, b), 2^n), and
+    /// returns (a, b, n) so it can be emitted as one FMA_RSCALE(a, b, -0, n).
+    /// The product is scaled after the multiply with a single rounding,
+    /// which is what the two FMULs compute unless an intermediate
+    /// overflows or underflows, so this is a contraction and is skipped
+    /// when either multiply forbids one.
+    fn fmul_as_rscale(
+        &self,
+        alu: &nir_alu_instr,
+    ) -> Option<(Src, Src, i32)> {
+        let no_contract = nir_fp_no_contract as u32;
+        if alu.def.bit_size != 32
+            || alu.def.num_components != 1
+            || alu.fp_math_ctrl() & no_contract != 0
+        {
+            return None;
+        }
+
+        fn inner_fmul(src: &nir_alu_src) -> Option<&nir_alu_instr> {
+            let inner = src.src.as_def().parent_instr().as_alu()?;
+            if inner.op != nir_op_fmul
+                || inner.def.num_components != 1
+                || inner.fp_math_ctrl() & (nir_fp_no_contract as u32) != 0
+            {
+                return None;
+            }
+            Some(inner)
+        }
+
+        for i in 0..2 {
+            let src = alu.get_src(i);
+            let other = alu.get_src(1 - i);
+
+            // fmul(fmul(a, b), 2^n)
+            if let Some(n) = Self::src_as_pow2_exp(other) {
+                if let Some(inner) = inner_fmul(src) {
+                    if Self::src_as_pow2_exp(inner.get_src(0)).is_none()
+                        && Self::src_as_pow2_exp(inner.get_src(1)).is_none()
+                    {
+                        return Some((
+                            self.get_alu_src(inner.get_src(0), 1),
+                            self.get_alu_src(inner.get_src(1), 1),
+                            n,
+                        ));
+                    }
+                }
+            }
+
+            // fmul(fmul(a, 2^n), b)
+            if other.src.as_def().parent_instr().as_load_const().is_some() {
+                continue;
+            }
+            if let Some(inner) = inner_fmul(src) {
+                for j in 0..2 {
+                    if let Some(n) = Self::src_as_pow2_exp(inner.get_src(j)) {
+                        return Some((
+                            self.get_alu_src(inner.get_src(1 - j), 1),
+                            self.get_alu_src(other, 1),
+                            n,
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn parse_const(
         &mut self,
         b: &mut impl SSABuilder,
@@ -890,13 +972,27 @@ impl<'a> ShaderFromNir<'a> {
                 });
             }
             nir_op_fmul => {
-                b.push_op(OpFma {
-                    dst: dst.into(),
-                    dst_type: dst_type(NumericType::Float),
-                    round: self.fround(alu.def.bit_size),
-                    clamp: FClamp::None,
-                    srcs: [srcs(0), srcs(1), Src::fneg_zero(alu.def.bit_size)],
-                });
+                if let Some((a, b2, n)) = self.fmul_as_rscale(alu) {
+                    b.push_op(OpFmaRScale {
+                        dst: dst.into(),
+                        round: self.fround(32),
+                        clamp: FClamp::None,
+                        srcs: [a, b2, Src::fneg_zero(32)],
+                        scale: Src::from(n as u32),
+                    });
+                } else {
+                    b.push_op(OpFma {
+                        dst: dst.into(),
+                        dst_type: dst_type(NumericType::Float),
+                        round: self.fround(alu.def.bit_size),
+                        clamp: FClamp::None,
+                        srcs: [
+                            srcs(0),
+                            srcs(1),
+                            Src::fneg_zero(alu.def.bit_size),
+                        ],
+                    });
+                }
             }
             nir_op_frcp => {
                 b.push_op(OpFRcp {
