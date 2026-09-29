@@ -366,6 +366,39 @@ impl<'a> ShaderFromNir<'a> {
         None
     }
 
+    /// Matches bcsel_pan(fcmp(a, b), 1.0, 0.0) on fp32, which is how NIR
+    /// lowers b2f32 of a float comparison, and returns the comparison so it
+    /// can be emitted as one FCMP with a 1.0/0.0 result instead of an FCMP
+    /// producing a mask and a MUX selecting the constants.
+    fn bcsel_as_fcmp_f1(
+        &self,
+        alu: &nir_alu_instr,
+    ) -> Option<(CmpOp, Src, Src)> {
+        if alu.def.bit_size != 32
+            || alu.def.num_components != 1
+            || alu.get_src(1).comp_as_uint(0) != Some(1.0_f32.to_bits().into())
+            || alu.get_src(2).comp_as_uint(0) != Some(0)
+        {
+            return None;
+        }
+        let cmp = alu.get_src(0).src.as_def().parent_instr().as_alu()?;
+        if cmp.def.num_components != 1 || cmp.get_src(0).bit_size() != 32 {
+            return None;
+        }
+        let cmp_op = match cmp.op {
+            nir_op_feq_pan => CmpOp::Eq,
+            nir_op_fge_pan => CmpOp::Ge,
+            nir_op_flt_pan => CmpOp::Lt,
+            nir_op_fneu_pan => CmpOp::Ne,
+            _ => return None,
+        };
+        Some((
+            cmp_op,
+            self.get_alu_src(cmp.get_src(0), 1),
+            self.get_alu_src(cmp.get_src(1), 1),
+        ))
+    }
+
     fn parse_const(
         &mut self,
         b: &mut impl SSABuilder,
@@ -531,6 +564,20 @@ impl<'a> ShaderFromNir<'a> {
         };
 
         match alu.op {
+            nir_op_bcsel_pan
+                if self.bcsel_as_fcmp_f1(alu).is_some() =>
+            {
+                let (cmp_op, a, c) = self.bcsel_as_fcmp_f1(alu).unwrap();
+                b.push_op(OpFCmp {
+                    dst: dst.into(),
+                    src_type: DataType::F32,
+                    res_type: CmpResultType::F1,
+                    cmp_op,
+                    srcs: [a, c],
+                    accum: 0_u32.into(),
+                    accum_op: CmpAccumOp::None,
+                });
+            }
             nir_op_bcsel_pan => {
                 b.push_op(OpMux {
                     dst: dst.into(),
