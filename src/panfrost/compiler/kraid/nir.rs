@@ -2681,10 +2681,41 @@ impl<'a> ShaderFromNir<'a> {
                 }
             }
             nir_intrinsic_demote_if => {
-                b.push_op(OpDiscard {
-                    cmp_op: CmpOp::Ne,
-                    srcs: [self.get_f32_src(&srcs[0]), 0_u32.into()],
-                });
+                // DISCARD compares two floats itself, with the same
+                // comparisons as FCMP, so a demote on a 32-bit float
+                // comparison needs no FCMP.
+                let cmp = srcs[0].as_def().parent_instr().as_alu().and_then(
+                    |cmp| {
+                        let cmp_op = match cmp.op {
+                            nir_op_feq_pan => CmpOp::Eq,
+                            nir_op_fge_pan => CmpOp::Ge,
+                            nir_op_flt_pan => CmpOp::Lt,
+                            nir_op_fneu_pan => CmpOp::Ne,
+                            _ => return None,
+                        };
+                        if cmp.def.num_components != 1
+                            || cmp.get_src(0).bit_size() != 32
+                        {
+                            return None;
+                        }
+                        Some((
+                            cmp_op,
+                            self.get_alu_src(cmp.get_src(0), 1),
+                            self.get_alu_src(cmp.get_src(1), 1),
+                        ))
+                    },
+                );
+                if let Some((cmp_op, a, c)) = cmp {
+                    b.push_op(OpDiscard {
+                        cmp_op,
+                        srcs: [a, c],
+                    });
+                } else {
+                    b.push_op(OpDiscard {
+                        cmp_op: CmpOp::Ne,
+                        srcs: [self.get_f32_src(&srcs[0]), 0_u32.into()],
+                    });
+                }
             }
             nir_intrinsic_demote => {
                 b.push_op(OpDiscard {
