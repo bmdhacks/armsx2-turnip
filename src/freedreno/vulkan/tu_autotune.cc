@@ -274,6 +274,16 @@ tu_autotune::get_env_config()
    static config_t at_config;
    std::call_once(once, [&] {
       algorithm algo = algorithm::DEFAULT;
+
+      /* ARMSX2: default to PREFER_SYSMEM on the Adreno 610. Replaying a Black (PS2) GS dump on a Snapdragon 662,
+       * BANDWIDTH sent the frame's few large blended render passes (~4,800 draws each) to GMEM and the GPU took
+       * 50.3 ms per frame; TU_DEBUG=sysmem and TU_AUTOTUNE_ALGO=prefer_sysmem both took 23.0 ms, with identical
+       * pixels. Only the 610 was measured, so the other gen1-low parts (605, 608, 612, 613) keep BANDWIDTH.
+       * TU_AUTOTUNE_ALGO and the drirc option below still override this.
+       */
+      if (fd_dev_gpu_id(&device->physical_device->dev_id) == 610)
+         algo = algorithm::PREFER_SYSMEM;
+
       const char *algo_str = os_get_option("TU_AUTOTUNE_ALGO");
       std::string_view algo_strv;
 
