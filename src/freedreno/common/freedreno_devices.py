@@ -1109,22 +1109,42 @@ add_gpus([
         raw_magic_regs = a720_raw_magic_regs,
     ))
 
+# ARMSX2: Adreno 722 (Snapdragon 7 Gen 4 / Dragonwing Q-7790, Retroid Pocket
+# Duo), KGSL chip id 0x43020100. UNVERIFIED ON HARDWARE.
+#
+# Upstream's entry here was Qualcomm's placeholder (A730 raw magic regs, one
+# CCU, 16-row tile alignment).  Qualcomm's KGSL (gen7_17_0) treats the A722 as
+# a member of the A720 (gen7_14_0) family: the same SP/USPTP counts in its
+# snapshot shader blocks (2 SPs, 2 USPTPs each, A730 has 4 and A710 has 1), the
+# same cluster tables, the same SQE firmware and the same "no concurrent
+# binning" perfcounter set.  So the A720 entry above is the closest measured
+# one and this entry copies its values.  GMEM size (1 MiB) is not a table
+# field; Turnip reads it from the kernel.  hbb 15 and UBWC 5 are what KGSL
+# reports for this part (the kernel value wins when it is available).
+# has_lpac stays as in a7xx_base: the A720 and A722 have no LPAC, but Turnip
+# only reads the flag for a6xx.
+#
+# a720_raw_magic_regs are used as they are.  A third-party A722 table
+# (Vauzi-17/710, from unpublished blob traces) differs in PC_MODE_CNTL
+# (0x3f), UCHE_CACHE_WAYS (0), SP_CHICKEN_BITS_2 (0x10), SP_CHICKEN_BITS
+# (0x400) and RB_CCU_DBG_ECO_CNTL (0x80000); those are not used here.
 add_gpus([
-        GPUId(chip_id=0x43020100, name="Adreno (TM) 722"),
-        GPUId(chip_id=0xffff43020100, name="Adreno (TM) 722"),
+        GPUId(chip_id=0x43020100, name="FD722"),
+        GPUId(chip_id=0xffff43020100, name="FD722"),
     ], A6xxGPUInfo(
         CHIP.A7XX,
         [a7xx_base, a7xx_gen1],
-        num_ccu = 1,
+        num_ccu = 2,
         tile_align_w = 64,
-        tile_align_h = 16,
+        tile_align_h = 32,
         tile_max_w = 1024,
         tile_max_h = 1024,
         num_vsc_pipes = 32,
         cs_shared_mem_size = 32 * 1024,
         wave_granularity = 2,
         fibers_per_sp = 128 * 2 * 16,
-        raw_magic_regs = a730_raw_magic_regs,
+        highest_bank_bit = 15,
+        raw_magic_regs = a720_raw_magic_regs,
     ))
 
 add_gpus([
