@@ -148,10 +148,34 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
    out->strides[0] = stride;
 
 #ifdef HAS_FREEDRENO
+   /* ARMSX2: Qualcomm's private_handle_t carries a magic ('gmsm') and then a
+    * flags word in the first two ints after the fds. Newer Qualcomm gralloc
+    * versions (reported on Android 15/16 devices) no longer store the magic, so
+    * requiring it left every buffer at DRM_FORMAT_MOD_INVALID and the swapchain
+    * image was laid out differently from the buffer (heavily distorted picture;
+    * whitebelyash/mesa-unified 6c6acf4d, Vauzi-17/710). An Adreno device on
+    * Android uses Qualcomm's gralloc, so read the flags word whenever the
+    * handle has the ints for it. Handles with the magic go through exactly
+    * the same path as before.
+    * UNVERIFIED: the flags word's position in a handle without the magic is
+    * taken from those reports, so log the ints to let a device check it.
+    * TODO: find a way to recognize a Qualcomm-allocated buffer without the magic.
+    */
    uint32_t gmsm = ('g' << 24) | ('m' << 16) | ('s' << 8) | 'm';
-   if (hnd->handle->numInts >= 2 && hnd->handle->data[hnd->handle->numFds] == gmsm) {
+   if (hnd->handle->numInts >= 2) {
+      const int *ints = &hnd->handle->data[hnd->handle->numFds];
+
+      if (ints[0] != gmsm) {
+         mesa_logi("u_gralloc: handle has no 'gmsm' magic (numFds %d, numInts %d, "
+                   "first ints %08x %08x %08x %08x), reading the Qualcomm UBWC flag anyway",
+                   hnd->handle->numFds, hnd->handle->numInts,
+                   (unsigned)ints[0], (unsigned)ints[1],
+                   hnd->handle->numInts > 2 ? (unsigned)ints[2] : 0,
+                   hnd->handle->numInts > 3 ? (unsigned)ints[3] : 0);
+      }
+
       /* This UBWC flag was introduced in a5xx. */
-      bool ubwc = hnd->handle->data[hnd->handle->numFds + 1] & 0x08000000;
+      bool ubwc = ints[1] & 0x08000000;
       out->modifier = ubwc ? DRM_FORMAT_MOD_QCOM_COMPRESSED : DRM_FORMAT_MOD_LINEAR;
    }
 #endif
