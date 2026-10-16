@@ -284,6 +284,15 @@ tu_autotune::get_env_config()
       if (fd_dev_gpu_id(&device->physical_device->dev_id) == 610)
          algo = algorithm::PREFER_SYSMEM;
 
+      /* ARMSX2: also default to PREFER_SYSMEM on the Adreno 722 (KGSL chip id 0x43020100; the msm kernel adds fuse
+       * bits above bit 31). UNVERIFIED: nothing has run on an A722 yet. Community A722 drivers report GMEM
+       * rendering glitches (broken 2D/UI draws) and recommend sysmem, and the A610 measurement above showed the
+       * default algorithm sending large blended passes to GMEM for a loss. Measure GMEM against sysmem on the
+       * device before keeping this. TU_AUTOTUNE_ALGO and the drirc option below still override it.
+       */
+      if ((device->physical_device->dev_id.chip_id & 0xffffffff) == 0x43020100)
+         algo = algorithm::PREFER_SYSMEM;
+
       const char *algo_str = os_get_option("TU_AUTOTUNE_ALGO");
       std::string_view algo_strv;
 
