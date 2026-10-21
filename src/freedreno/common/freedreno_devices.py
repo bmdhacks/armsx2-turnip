@@ -1124,7 +1124,13 @@ add_gpus([
 # has_lpac stays as in a7xx_base: the A720 and A722 have no LPAC, but Turnip
 # only reads the flag for a6xx.
 #
-# a720_raw_magic_regs are used as they are.  A third-party A722 table
+# a720_raw_magic_regs are used, plus RB_RBP_CNTL and RB_DBG_ECO_CNTL written as
+# 0.  Those two were once written for the A710 and A720 as well, through
+# a730_magic_regs ("RB_* magic all zero like A730"); upstream's "Drop
+# magic_regs" series moved the values into the A730 and A740 raw tables only,
+# so a720_raw_magic_regs no longer carries them and the A722 would stop writing
+# them.  Written explicitly here to keep what the A722 pack tested on a Retroid
+# Pocket Duo did.  A third-party A722 table
 # (Vauzi-17/710, from unpublished blob traces) differs in PC_MODE_CNTL
 # (0x3f), UCHE_CACHE_WAYS (0), SP_CHICKEN_BITS_2 (0x10), SP_CHICKEN_BITS
 # (0x400) and RB_CCU_DBG_ECO_CNTL (0x80000); those are not used here.
@@ -1144,7 +1150,10 @@ add_gpus([
         wave_granularity = 2,
         fibers_per_sp = 128 * 2 * 16,
         highest_bank_bit = 15,
-        raw_magic_regs = a720_raw_magic_regs,
+        raw_magic_regs = a720_raw_magic_regs + [
+            [A6XXRegs.REG_A6XX_RB_RBP_CNTL,       0x0],
+            [A6XXRegs.REG_A6XX_RB_DBG_ECO_CNTL,   0x0],
+        ],
     ))
 
 add_gpus([
