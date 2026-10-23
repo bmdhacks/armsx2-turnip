@@ -172,6 +172,14 @@ struct wsi_device {
    /* Set to true if the implementation is ok with linear WSI images. */
    bool wants_linear;
 
+   /* Set to true if the driver's GPU writes to an exported dma-buf never
+    * reach the buffer's implicit fences (the kernel driver does not track
+    * them), so KMS cannot see when a frame is done.  Where the kernel also
+    * lacks dma-buf sync-file import, a display swapchain then gives each
+    * flip the present's sync file as the plane's IN_FENCE_FD.
+    */
+   bool no_dma_buf_implicit_sync;
+
    /* Whether present_wait functionality is enabled on the device.
     * In this case, we have to create an extra timeline semaphore
     * to be able to synchronize with the WSI present semaphore being unsignalled.
