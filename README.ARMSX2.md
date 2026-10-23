@@ -89,7 +89,7 @@ as one family (same SP counts, same clusters, same firmware), with two CCUs and
 as 0 on the A722: upstream's magic-register cleanup stopped writing them on the
 A710 and A720 (apparently unintended), and the A722 pack tested on a Duo wrote
 them. The autotuner defaults to `BANDWIDTH` with the `TUNE_SMALL` flag on chip id
-`0x43020100`. Measured on a Duo (17 ARMSX2 GS dumps at 2x, GPU-inclusive time per
+`0x43020100` (and `SETTLE`, described below). Measured on a Duo (17 ARMSX2 GS dumps at 2x, GPU-inclusive time per
 drawn frame), that is faster than `PREFER_SYSMEM` by more than 2% on 13 dumps (mean
 -6.7%, median -7.7%) and slower on Burnout 3 (+2.2%) and Jak II (+3.2%), with
 identical pixels on all 17; forcing GMEM costs +93% on Burnout 3. `TU_AUTOTUNE_ALGO`
@@ -102,6 +102,20 @@ reads the Qualcomm UBWC flag from buffer handles that carry no `gmsm` magic, whi
 is reported for newer Qualcomm gralloc versions; without it the swapchain image is
 laid out differently from the buffer. The commit messages say which numbers come
 from other people's reports and not from a device.
+
+**Cheaper autotuning per render pass (`tu/autotune: cut the per-render-pass
+bookkeeping cost`, `… add a SETTLE flag …`, `… log per-second counts …`).** With
+`TUNE_SMALL` every render pass goes through the autotuner, and on the Duo each one
+cost about 1.5 µs of the emulator's GS-thread time, mostly bookkeeping for the
+samples-passed measurement. On Jak II (324 passes a frame) and Burnout 3 (142) that
+cost more than GMEM gained. The first commit removes clock reads, duplicate history
+references and per-pass heap nodes without changing any decision. The second adds a
+`SETTLE` flag, on by default on the A722 with `TUNE_SMALL`: once a pass's decision no
+longer depends on the next measurement, only one instance in 32 is measured, and the
+others get no result buffer, no GPU events and no read-back. The decision rule is the
+same and is still made on every instance. The third logs per-second counts when
+`TU_AUTOTUNE_STATS=1`. Not yet measured on a device; the design and the test plan are
+in the ARMSX2 umbrella, `devs/bmdhacks/campaigns/duo-gmem-2026-10-22/autotune-cpu-design.md`.
 
 **Wayland build switch (`wsi/wayland: let a build opt out of wl_fixes …`).** Lets
 the ARM Linux build target an older `libwayland` than the build host has. It changes
