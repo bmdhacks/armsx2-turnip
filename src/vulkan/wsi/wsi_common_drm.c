@@ -392,6 +392,64 @@ wsi_drm_init_swapchain_implicit_sync(struct wsi_swapchain *chain)
                                       &chain->dma_buf_semaphore);
 }
 
+/* For a backend that can hand the kernel an explicit fence for a present
+ * (wsi_display: the plane's IN_FENCE_FD).  Needed only when nothing else
+ * makes the kernel wait for the GPU: the driver does no implicit sync of
+ * its own and the kernel has no dma-buf sync-file import for
+ * dma_buf_semaphore.  Without it, KMS can scan out an image the GPU is
+ * still rendering, which shows the image's previous contents.
+ *
+ * Returns whether the swapchain now has a present_sync_semaphore.
+ */
+bool
+wsi_drm_init_swapchain_present_sync_file(struct wsi_swapchain *chain)
+{
+   const struct wsi_device *wsi = chain->wsi;
+
+   if (!wsi->no_dma_buf_implicit_sync || chain->image_info.explicit_sync ||
+       chain->dma_buf_semaphore != VK_NULL_HANDLE ||
+       !(wsi->semaphore_export_handle_types &
+         VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT))
+      return false;
+
+   const VkExportSemaphoreCreateInfo export_info = {
+      .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+      .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+   };
+   const VkSemaphoreCreateInfo semaphore_info = {
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+      .pNext = &export_info,
+   };
+   return wsi->CreateSemaphore(chain->device, &semaphore_info, &chain->alloc,
+                               &chain->present_sync_semaphore) == VK_SUCCESS;
+}
+
+/* Called after the pre-present submit that signaled present_sync_semaphore.
+ * A sync file that cannot be exported leaves present_sync_fd at -1, which
+ * presents unfenced, as without present_sync_semaphore.
+ */
+void
+wsi_drm_export_present_sync_file(const struct wsi_swapchain *chain,
+                                 struct wsi_image *image)
+{
+   if (image->present_sync_fd >= 0) {
+      close(image->present_sync_fd);
+      image->present_sync_fd = -1;
+   }
+
+   const VkSemaphoreGetFdInfoKHR get_fd_info = {
+      .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+      .semaphore = chain->present_sync_semaphore,
+      .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+   };
+   int fd = -1;
+   if (chain->wsi->GetSemaphoreFdKHR(chain->device, &get_fd_info, &fd) != VK_SUCCESS)
+      return;
+
+   /* -1 means the work has already completed. */
+   image->present_sync_fd = fd;
+}
+
 static VkResult
 wsi_create_sync_imm(struct vk_device *device, struct vk_sync **sync_out)
 {
