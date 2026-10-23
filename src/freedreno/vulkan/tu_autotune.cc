@@ -108,6 +108,7 @@ enum class tu_autotune::mod_flag : uint8_t {
    BIG_GMEM = BIT(1),         /* All RPs with >= 10 draws use GMEM. */
    TUNE_SMALL = BIT(2),       /* Try tuning all RPs with <= 5 draws, ignored by default. */
    PREEMPT_OPTIMIZE = BIT(3),  /* Attempts to minimize the preemption latency. */
+   SETTLE = BIT(4),           /* BANDWIDTH: measure a pass only now and then once its decision is settled. */
 };
 
 /* Metric flags, for internal tracking of enabled metrics. */
@@ -216,6 +217,7 @@ struct PACKED tu_autotune::config_t {
       MODF_STR(BIG_GMEM);
       MODF_STR(TUNE_SMALL);
       MODF_STR(PREEMPT_OPTIMIZE);
+      MODF_STR(SETTLE);
       str += ")";
 
       str += ", Metric Flags: 0x" + std::to_string(metric_flags) + " (";
@@ -295,12 +297,18 @@ tu_autotune::get_env_config()
        * which a surfaceless replay never draws and which community drivers report glitching in GMEM.
        * Record: ARMSX2 umbrella devs/bmdhacks/campaigns/duo-gmem-2026-10-22/.
        *
+       *
+       * SETTLE is on as well: with TUNE_SMALL every pass is tuned, and Jak II and Burnout 3 have 324 and 142 passes a
+       * frame, so measuring every pass every frame cost them more GS-thread time than GMEM gained. SETTLE keeps the
+       * decision rule and measures a pass only once in a while after its decision stops depending on new results.
+       *
        * TU_AUTOTUNE_ALGO and the drirc option replace the algorithm. TU_AUTOTUNE_FLAGS replaces the flags when it is
-       * set, so any value that does not name tune_small drops it (TU_AUTOTUNE_FLAGS=none leaves no flags).
+       * set, so any value that does not name tune_small or settle drops it (TU_AUTOTUNE_FLAGS=none leaves no flags,
+       * TU_AUTOTUNE_FLAGS=tune_small is the previous default).
        */
       if ((device->physical_device->dev_id.chip_id & 0xffffffff) == 0x43020100) {
          algo = algorithm::BANDWIDTH;
-         mod_flags = static_cast<uint32_t>(mod_flag::TUNE_SMALL);
+         mod_flags = static_cast<uint32_t>(mod_flag::TUNE_SMALL) | static_cast<uint32_t>(mod_flag::SETTLE);
       }
 
       const char *algo_str = os_get_option("TU_AUTOTUNE_ALGO");
@@ -337,6 +345,7 @@ tu_autotune::get_env_config()
             { "big_gmem", static_cast<uint32_t>(mod_flag::BIG_GMEM) },
             { "tune_small", static_cast<uint32_t>(mod_flag::TUNE_SMALL) },
             { "preempt_optimize", static_cast<uint32_t>(mod_flag::PREEMPT_OPTIMIZE) },
+            { "settle", static_cast<uint32_t>(mod_flag::SETTLE) },
             { NULL, 0 }
          };
 
@@ -363,8 +372,8 @@ tu_autotune::get_env_config()
 uint32_t
 tu_autotune::get_supported_mod_flags(tu_device *device) const
 {
-   uint32_t supported_mod_flags =
-      static_cast<uint32_t>(mod_flag::BIG_GMEM) | static_cast<uint32_t>(mod_flag::TUNE_SMALL);
+   uint32_t supported_mod_flags = static_cast<uint32_t>(mod_flag::BIG_GMEM) |
+                                  static_cast<uint32_t>(mod_flag::TUNE_SMALL) | static_cast<uint32_t>(mod_flag::SETTLE);
    if (device->physical_device->info->props.max_draw_states > TU_DRAW_STATE_AT_WRITE_RP_HASH &&
        device->physical_device->is_perf_cntr_selectable) {
       supported_mod_flags |= static_cast<uint32_t>(mod_flag::PREEMPT_OPTIMIZE);
@@ -1042,19 +1051,38 @@ struct tu_autotune::rp_history {
    /** Bandwidth Estimation Algorithm **/
    struct bandwidth_algo {
     private:
+      /* With mod_flag::SETTLE, a pass with at least SETTLE_MIN_RESULTS results whose decision does not hinge on the
+       * next result is measured once every SETTLE_INTERVAL instances instead of every time. The decision itself is
+       * made the same way on every instance, from the mean of the results so far.
+       */
+      static constexpr uint32_t SETTLE_MIN_RESULTS = 4;
+      static constexpr uint32_t SETTLE_INTERVAL = 32;
+
       exponential_average<uint32_t> mean_samples_passed;
+      /* Written only from on_submit (process()), read while recording. */
+      std::atomic<uint32_t> results = 0;
+      std::atomic<uint32_t> last_samples = 0;
+      /* Instances left to run unmeasured before the next measurement. Racing recorders can only make a pass be
+       * measured slightly more or less often.
+       */
+      std::atomic<uint32_t> unmeasured_left = 0;
 
     public:
       void update(uint32_t samples)
       {
          mean_samples_passed.add(samples);
+         last_samples.store(samples, std::memory_order_relaxed);
+         results.store(results.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
       }
 
+      /* Sets *measure to whether this instance should record samples-passed for a later update(). */
       render_mode get_optimal_mode(rp_history &history,
                                    const struct tu_cmd_state *cmd_state,
                                    const struct tu_render_pass *pass,
                                    const struct tu_framebuffer *framebuffer,
-                                   const struct tu_render_pass_state *rp_state)
+                                   const struct tu_render_pass_state *rp_state,
+                                   bool settle,
+                                   bool *measure)
       {
          uint32_t pass_pixel_count = 0;
          if (cmd_state->per_layer_render_area) {
@@ -1068,44 +1096,75 @@ struct tu_autotune::rp_history {
                extent.width * extent.height * MAX2(cmd_state->pass->num_views, cmd_state->framebuffer->layers);
          }
 
-         uint64_t sysmem_bandwidth = static_cast<uint64_t>(pass->sysmem_bandwidth_per_pixel) * pass_pixel_count;
-         uint64_t gmem_bandwidth = static_cast<uint64_t>(pass->gmem_bandwidth_per_pixel) * pass_pixel_count;
+         const uint64_t sysmem_attachment_bandwidth =
+            static_cast<uint64_t>(pass->sysmem_bandwidth_per_pixel) * pass_pixel_count;
+         const uint64_t gmem_attachment_bandwidth =
+            static_cast<uint64_t>(pass->gmem_bandwidth_per_pixel) * pass_pixel_count;
 
-         uint64_t total_draw_call_bandwidth = 0;
-         uint64_t mean_samples = mean_samples_passed.get();
-         if (rp_state->drawcall_count && mean_samples > 0.0) {
-            /* The total draw call bandwidth is estimated as the average samples (collected via tracking samples passed
-             * within the CS) multiplied by the drawcall bandwidth per sample, divided by the amount of draw calls.
-             *
-             * This is a rough estimate of the bandwidth used by the draw calls in the renderpass for FB writes which
-             * is used to determine whether to use SYSMEM or GMEM.
-             */
-            total_draw_call_bandwidth =
-               (mean_samples * rp_state->drawcall_bandwidth_per_sample_sum) / rp_state->drawcall_count;
-         }
-
-         /* Drawcalls access the memory in SYSMEM rendering (ignoring CCU). */
-         sysmem_bandwidth += total_draw_call_bandwidth;
-
-         /* Drawcalls access GMEM in GMEM rendering, but we do not want to ignore them completely.  The state changes
-          * between tiles also have an overhead.  The magic numbers of 11 and 10 are randomly chosen.
+         /* The total draw call bandwidth is estimated as the average samples (collected via tracking samples passed
+          * within the CS) multiplied by the drawcall bandwidth per sample, divided by the amount of draw calls.
+          *
+          * This is a rough estimate of the bandwidth used by the draw calls in the renderpass for FB writes which
+          * is used to determine whether to use SYSMEM or GMEM.
           */
-         gmem_bandwidth = (gmem_bandwidth * 11 + total_draw_call_bandwidth) / 10;
+         auto draw_call_bandwidth = [&](uint64_t samples) -> uint64_t {
+            if (!rp_state->drawcall_count || samples == 0)
+               return 0;
+            return (samples * rp_state->drawcall_bandwidth_per_sample_sum) / rp_state->drawcall_count;
+         };
 
-         bool select_sysmem = sysmem_bandwidth <= gmem_bandwidth;
-         render_mode mode = select_sysmem ? render_mode::SYSMEM : render_mode::GMEM;
+         /* Drawcalls access the memory in SYSMEM rendering (ignoring CCU).
+          *
+          * Drawcalls access GMEM in GMEM rendering, but we do not want to ignore them completely.  The state changes
+          * between tiles also have an overhead.  The magic numbers of 11 and 10 are randomly chosen.
+          *
+          * The result only moves from SYSMEM to GMEM as samples grows.
+          */
+         auto mode_for = [&](uint64_t samples) {
+            uint64_t draw_bandwidth = draw_call_bandwidth(samples);
+            uint64_t sysmem_bandwidth = sysmem_attachment_bandwidth + draw_bandwidth;
+            uint64_t gmem_bandwidth = (gmem_attachment_bandwidth * 11 + draw_bandwidth) / 10;
+            return sysmem_bandwidth <= gmem_bandwidth ? render_mode::SYSMEM : render_mode::GMEM;
+         };
+
+         uint64_t mean_samples = mean_samples_passed.get();
+         render_mode mode = mode_for(mean_samples);
+
+         *measure = true;
+         if (settle && results.load(std::memory_order_relaxed) >= SETTLE_MIN_RESULTS) {
+            uint64_t last = last_samples.load(std::memory_order_relaxed);
+            uint64_t lo = MIN2(mean_samples, last), hi = MAX2(mean_samples, last);
+
+            /* Settled if the decision would hold with half the smaller or twice the larger of the mean and the last
+             * result, or if the last result agrees with the mean's decision and is within 1/8 of the mean, in which
+             * case further results could only nudge the mean.
+             */
+            bool distant = mode_for(lo / 2) == mode && mode_for(hi * 2) == mode;
+            bool steady = mode_for(last) == mode && (hi - lo) * 8 <= mean_samples + 8;
+
+            if (distant || steady) {
+               uint32_t left = unmeasured_left.load(std::memory_order_relaxed);
+               if (left > 0) {
+                  unmeasured_left.store(left - 1, std::memory_order_relaxed);
+                  *measure = false;
+               } else {
+                  unmeasured_left.store(SETTLE_INTERVAL - 1, std::memory_order_relaxed);
+               }
+            } else {
+               unmeasured_left.store(0, std::memory_order_relaxed);
+            }
+         }
 
          UNUSED const VkExtent2D &extent = cmd_state->render_areas[0].extent;
          at_log_bandwidth_h(
-            "%" PRIu32 " selecting %s\n"
+            "%" PRIu32 " selecting %s%s\n"
             "   mean_samples=%" PRIu64 ", draw_bandwidth_per_sample=%.2f, total_draw_call_bandwidth=%" PRIu64
             ", render_areas[0]=%" PRIu32 "x%" PRIu32 ", sysmem_bandwidth_per_pixel=%" PRIu32
-            ", gmem_bandwidth_per_pixel=%" PRIu32 ", sysmem_bandwidth=%" PRIu64 ", gmem_bandwidth=%" PRIu64,
-            history.hash, rp_state->drawcall_count, render_mode_str(mode), mean_samples,
-            static_cast<float>(rp_state->drawcall_bandwidth_per_sample_sum) / rp_state->drawcall_count,
-            total_draw_call_bandwidth,
-            extent.width, extent.height, pass->sysmem_bandwidth_per_pixel, pass->gmem_bandwidth_per_pixel,
-            sysmem_bandwidth, gmem_bandwidth);
+            ", gmem_bandwidth_per_pixel=%" PRIu32,
+            history.hash, rp_state->drawcall_count, render_mode_str(mode), *measure ? "" : " (settled)",
+            mean_samples, static_cast<float>(rp_state->drawcall_bandwidth_per_sample_sum) / rp_state->drawcall_count,
+            draw_call_bandwidth(mean_samples), extent.width, extent.height, pass->sysmem_bandwidth_per_pixel,
+            pass->gmem_bandwidth_per_pixel);
 
          return mode;
       }
@@ -1978,6 +2037,7 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
    uint64_t now = coarse_now_ns.load(std::memory_order_relaxed);
    std::shared_lock shared_lock(rp_mutex);
    std::unique_lock<std::shared_mutex> unique_lock;
+   bool created = false;
    auto it = rp_histories.find(key);
    if (it == rp_histories.end()) {
       shared_lock.unlock();
@@ -1987,6 +2047,7 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
          it = rp_histories
                  .emplace(std::piecewise_construct, std::forward_as_tuple(key), std::forward_as_tuple(key.hash, now))
                  .first;
+         created = true;
       }
    }
    rp_history &history = it->second;
@@ -2012,6 +2073,7 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
 
    render_mode mode = default_mode;
    const char *reason = nullptr;
+   bool measure = true;
    if (config.test(mod_flag::PREEMPT_OPTIMIZE) && history.preempt_optimize.is_latency_sensitive()) {
       /* Try to mitigate the risk of high preemption latency by always using GMEM, which should break up any larger
        * draws into smaller ones with tiling.
@@ -2027,10 +2089,20 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
    } else if (config.is_enabled(algorithm::PROFILED) || config.is_enabled(algorithm::PROFILED_IMM)) {
       mode = history.profiled.get_optimal_mode(history);
    } else if (config.is_enabled(algorithm::BANDWIDTH)) {
-      mode = history.bandwidth.get_optimal_mode(history, cmd_state, pass, framebuffer, rp_state);
+      /* Preemption-latency tracking needs the per-RP timestamps of every instance, so it never settles. */
+      bool settle = config.test(mod_flag::SETTLE) && !config.test(mod_flag::PREEMPT_OPTIMIZE);
+      mode = history.bandwidth.get_optimal_mode(history, cmd_state, pass, framebuffer, rp_state, settle, &measure);
+
+      /* A key seen for the first time may never come back (an image recreated every frame gets a new key every frame).
+       * Its first decision rests on the attachment traffic alone either way, so learning starts at the second instance.
+       */
+      if (settle && created)
+         measure = false;
    }
 
-   *rp_ctx = cb_ctx.attach_rp_entry(device, rp_history_handle(history), config, rp_state->drawcall_count);
+   /* An unmeasured pass gets no entry: no result buffer, no samples-passed events, nothing to process at submit. */
+   if (measure)
+      *rp_ctx = cb_ctx.attach_rp_entry(device, rp_history_handle(history), config, rp_state->drawcall_count);
 
    return reason ? forced(reason, mode) : mode;
 }
