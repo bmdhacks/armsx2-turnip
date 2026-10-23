@@ -89,15 +89,21 @@ as one family (same SP counts, same clusters, same firmware), with two CCUs and
 as 0 on the A722: upstream's magic-register cleanup stopped writing them on the
 A710 and A720 (apparently unintended), and the A722 pack tested on a Duo wrote
 them. The autotuner defaults to `BANDWIDTH` with the `TUNE_SMALL` flag on chip id
-`0x43020100` (and `SETTLE`, described below). Measured on a Duo (17 ARMSX2 GS dumps at 2x, GPU-inclusive time per
-drawn frame), that is faster than `PREFER_SYSMEM` by more than 2% on 13 dumps (mean
--6.7%, median -7.7%) and slower on Burnout 3 (+2.2%) and Jak II (+3.2%), with
-identical pixels on all 17; forcing GMEM costs +93% on Burnout 3. `TU_AUTOTUNE_ALGO`
-and the drirc option replace the algorithm, and a set `TU_AUTOTUNE_FLAGS` replaces
-the default flags (`TU_AUTOTUNE_FLAGS=none` leaves none). The default was first
-`PREFER_SYSMEM`, chosen before any measurement because community A722 drivers
-report glitched UI draws in GMEM; the replays did not draw the app's own UI and
-post-processing passes, so that report is still untested here. And `u_gralloc`
+`0x43020100` (and `SETTLE`, described below). Measured on a Duo (17 ARMSX2 GS dumps
+at 2x, GPU-inclusive time per drawn frame, three repetitions), that is faster than
+`PREFER_SYSMEM` by more than 2% on 13 dumps and within 2% on the other 4 (Burnout 3,
+Jak II, Jak 3, Ratchet & Clank: Up Your Arsenal), with none slower by more than 0.2%.
+Mean -7.1%, median -8.2%, identical pixels on all 17. Without the cheaper autotuning
+below, Burnout 3 and Jak II were 2.2% and 3.2% slower than `PREFER_SYSMEM`, because
+the GS thread paid for the bookkeeping. Forcing GMEM costs +93% on Burnout 3.
+`TU_AUTOTUNE_ALGO` and the drirc option replace the algorithm, and a set
+`TU_AUTOTUNE_FLAGS` replaces the default flags (`TU_AUTOTUNE_FLAGS=none` leaves
+none). The default was first `PREFER_SYSMEM`, chosen before any measurement because
+community A722 drivers report glitched UI draws in GMEM. The replays do not draw the
+app's own UI and post-processing passes, so that report was tested by playing: many
+games and settings in ARMSX2 on a Duo showed no rendering problems and the same or
+better speed than the system driver. On a Retroid Pocket Nova (Adreno 740) the same
+play tests showed the speed of the previous driver and no artifacts. And `u_gralloc`
 reads the Qualcomm UBWC flag from buffer handles that carry no `gmsm` magic, which
 is reported for newer Qualcomm gralloc versions; without it the swapchain image is
 laid out differently from the buffer. The commit messages say which numbers come
@@ -114,8 +120,14 @@ references and per-pass heap nodes without changing any decision. The second add
 longer depends on the next measurement, only one instance in 32 is measured, and the
 others get no result buffer, no GPU events and no read-back. The decision rule is the
 same and is still made on every instance. The third logs per-second counts when
-`TU_AUTOTUNE_STATS=1`. Not yet measured on a device; the design and the test plan are
-in the ARMSX2 umbrella, `devs/bmdhacks/campaigns/duo-gmem-2026-10-22/autotune-cpu-design.md`.
+`TU_AUTOTUNE_STATS=1`. Measured on a Duo with the register restore below, on the 17
+dumps above: every render pass makes the same GMEM or sysmem choice as without these
+commits (checked on five dumps), the pixels are identical on all 17, and the GS-thread
+loss on Jak II and Burnout 3 is gone (median GS-thread time per frame 14.2 ms against
+14.6 on Jak II, 8.4 against 8.8 on Burnout 3). With `SETTLE`, 3 to 5% of the passes
+are still measured each second on Jak II, Burnout 3 and Shadow of the Colossus, and 13%
+on God of War II. The design and the test plan are in the ARMSX2 umbrella,
+`devs/bmdhacks/campaigns/duo-gmem-2026-10-22/autotune-cpu-design.md`.
 
 **Register restore after a context switch on Adreno 7xx (`tu: restore the a7xx
 RB clear/buffer/CCU registers when switching back into a command buffer`).** On
@@ -124,17 +136,20 @@ compositor, in the middle of a tiled (GMEM) render pass. When it switches back,
 it does not restore the register that says whether clears go to tile memory or
 to memory, and the compositor left it set to memory. The rest of the pass then
 clears the attachment in memory instead of the tile, and the pass comes out
-with all but its last tile black or stale, which is what the Burnout 3 and
-God of War II flicker with pack `axfl2-004` looks like. Turnip already rewrites these registers
-after a switch at the end of a tile, but on this GPU that never happens, so
-its tile restore code never runs. The fix keeps a copy of the three registers
-in memory whenever Turnip writes them, and gives the GPU a small command list
-to run on every switch back that writes the copies into the registers. It
-applies to all Adreno 7xx and costs nothing unless a switch happens. Measured
-on a Retroid Pocket Duo with a GS dump replayed while a second, high-priority
-GLES program draws: GMEM arms differed from sysmem in 6 to 58 of 80 frames
-per run without the change and in none of 480 frames with it. Replay time
-per frame did not change measurably (within 0.8% on three dumps).
+with all but its last tile black or stale, which showed as flickering regions in
+Burnout 3 and God of War II whenever the autotuner chose tiled rendering. Turnip
+already rewrites these registers after a switch at the end of a tile, but on this
+GPU that never happens, so its tile restore code never runs. The fix keeps a copy
+of the three registers in memory whenever Turnip writes them, and gives the GPU a
+small command list to run on every switch back that writes the copies into the
+registers. It applies to all Adreno 7xx. The copies are a few extra register-sized
+writes per render pass, and the restore itself runs only after a switch. Measured
+on a Retroid Pocket Duo with a GS dump replayed while a second, high-priority GLES
+program draws: GMEM arms differed from sysmem in 6 to 58 of 80 frames per run
+without the change and in none of 240 frames per arm, on each of Burnout 3 and God
+of War II, with it (default autotuning and forced GMEM). Replay time per frame did
+not change measurably (within 0.8% on three dumps). Only the A722 was tested for
+the flicker itself.
 
 **Wayland build switch (`wsi/wayland: let a build opt out of wl_fixes …`).** Lets
 the ARM Linux build target an older `libwayland` than the build host has. It changes
