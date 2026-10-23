@@ -804,7 +804,7 @@ tu_autotune::rp_entry_batch::rp_entry_batch(struct tu_device *device, bool track
 bool
 tu_autotune::rp_entry_batch::requires_processing() const
 {
-   return !entries.empty() || (preempt_latency.allocated && !all_renderpasses.empty());
+   return !entries.empty() || (preempt_latency.allocated && has_renderpasses);
 }
 
 void
@@ -1035,7 +1035,7 @@ struct tu_autotune::rp_history {
    std::atomic<uint32_t> refcount = 0; /* Reference count to prevent deletion when active. */
    std::atomic<uint64_t> last_use_ts;  /* Last time the reference count was updated, in monotonic nanoseconds. */
 
-   rp_history(uint64_t hash): hash(hash), last_use_ts(os_time_get_nano()), profiled(hash)
+   rp_history(uint64_t hash, uint64_t now_ns): hash(hash), last_use_ts(now_ns), profiled(hash)
    {
    }
 
@@ -1393,7 +1393,6 @@ tu_autotune::rp_history_handle::~rp_history_handle()
    if (!history)
       return;
 
-   history->last_use_ts.store(os_time_get_nano(), std::memory_order_relaxed);
    ASSERTED uint32_t old_refcount = history->refcount.fetch_sub(1, std::memory_order_relaxed);
    assert(old_refcount != 0); /* Underflow check. */
 }
@@ -1401,7 +1400,6 @@ tu_autotune::rp_history_handle::~rp_history_handle()
 tu_autotune::rp_history_handle::rp_history_handle(rp_history &history): history(&history)
 {
    history.refcount.fetch_add(1, std::memory_order_relaxed);
-   history.last_use_ts.store(os_time_get_nano(), std::memory_order_relaxed);
 }
 
 tu_autotune::rp_history_handle
@@ -1415,27 +1413,10 @@ tu_autotune::find_rp_history(const rp_key &key)
    return rp_history_handle(nullptr);
 }
 
-tu_autotune::rp_history_handle
-tu_autotune::find_or_create_rp_history(const rp_key &key)
-{
-   rp_history *existing = find_rp_history(key);
-   if (existing)
-      return *existing;
-
-   /* If we reach here, we have to create a new history. */
-   std::unique_lock lock(rp_mutex);
-   auto it = rp_histories.find(key);
-   if (it != rp_histories.end())
-      return it->second; /* Another thread created the history while we were waiting for the lock. */
-   auto history = rp_histories.emplace(std::make_pair(key, key.hash));
-   return rp_history_handle(history.first->second);
-}
-
 void
-tu_autotune::reap_old_rp_histories()
+tu_autotune::reap_old_rp_histories(uint64_t now)
 {
    constexpr uint64_t REAP_INTERVAL_NS = 10'000'000'000; /* 10s */
-   uint64_t now = os_time_get_nano();
    if (last_reap_ts + REAP_INTERVAL_NS > now)
       return;
    last_reap_ts = now;
@@ -1500,7 +1481,7 @@ tu_autotune::supports_preempt_latency_tracking() const
 }
 
 void
-tu_autotune::cleanup_latency_tracking()
+tu_autotune::cleanup_latency_tracking(uint64_t now)
 {
    constexpr uint64_t CLEANUP_INTERVAL_NS = 10'000'000'000;         /* 10s */
    constexpr uint64_t FORGET_ABOUT_DELAY_AFTER_NS = 20'000'000'000; /* 20s */
@@ -1508,7 +1489,6 @@ tu_autotune::cleanup_latency_tracking()
    if (!active_config.load().test(mod_flag::PREEMPT_OPTIMIZE))
       return;
 
-   uint64_t now = os_time_get_nano();
    if (last_latency_cleanup_ts + CLEANUP_INTERVAL_NS > now)
       return;
    last_latency_cleanup_ts = now;
@@ -1651,9 +1631,12 @@ tu_autotune::on_submit(struct tu_cmd_buffer **cmd_buffers, uint32_t cmd_buffer_c
     * entries. It's also important that any entries are processed here because we always want to ensure that we've
     * processed all entries from prior CBs before we submit any new CBs with the same RP to the GPU.
     */
+   uint64_t now = os_time_get_nano();
+   coarse_now_ns.store(now, std::memory_order_relaxed);
+
    process_entries();
-   cleanup_latency_tracking();
-   reap_old_rp_histories();
+   cleanup_latency_tracking(now);
+   reap_old_rp_histories(now);
 
    bool has_results = false;
    for (uint32_t i = 0; i < cmd_buffer_count; i++) {
@@ -1691,7 +1674,8 @@ tu_autotune::on_submit(struct tu_cmd_buffer **cmd_buffers, uint32_t cmd_buffer_c
 }
 
 tu_autotune::tu_autotune(struct tu_device *device, VkResult &result)
-    : device(device), supported_mod_flags(get_supported_mod_flags(device)), active_config(get_env_config())
+    : device(device), supported_mod_flags(get_supported_mod_flags(device)), active_config(get_env_config()),
+      coarse_now_ns(os_time_get_nano())
 {
    tu_bo_suballocator_init(&suballoc, device, 128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE, "autotune_suballoc");
 
@@ -1775,6 +1759,63 @@ void
 tu_autotune::cmd_buf_ctx::reset(struct tu_autotune &autotune)
 {
    batch = autotune.create_batch();
+   clear_rp_instances();
+}
+
+void
+tu_autotune::cmd_buf_ctx::clear_rp_instances()
+{
+   rp_instances_used = 0;
+   if (++rp_instances_gen == 0) {
+      for (rp_instance_slot &slot : rp_instances)
+         slot.gen = 0;
+      rp_instances_gen = 1;
+   }
+}
+
+tu_autotune::cmd_buf_ctx::rp_instance_slot *
+tu_autotune::cmd_buf_ctx::find_rp_instance(uint64_t hash, bool insert)
+{
+   constexpr size_t INITIAL_SLOTS = 256;
+
+   if (rp_instances.empty()) {
+      if (!insert)
+         return nullptr;
+      rp_instances.assign(INITIAL_SLOTS, rp_instance_slot { 0, 0, 0 });
+   }
+
+   for (;;) {
+      size_t mask = rp_instances.size() - 1;
+      for (size_t i = hash & mask;; i = (i + 1) & mask) {
+         rp_instance_slot &slot = rp_instances[i];
+         if (slot.gen == rp_instances_gen) {
+            if (slot.hash == hash)
+               return &slot;
+            continue;
+         }
+
+         if (!insert)
+            return nullptr;
+         if ((rp_instances_used + 1) * 2 > rp_instances.size())
+            break; /* Keep the load under half, grow and probe again. */
+
+         slot = rp_instance_slot { hash, 0, rp_instances_gen };
+         rp_instances_used++;
+         return &slot;
+      }
+
+      std::vector<rp_instance_slot> old(rp_instances.size() * 2, rp_instance_slot { 0, 0, 0 });
+      old.swap(rp_instances);
+      mask = rp_instances.size() - 1;
+      for (const rp_instance_slot &slot : old) {
+         if (slot.gen != rp_instances_gen)
+            continue;
+         size_t i = slot.hash & mask;
+         while (rp_instances[i].gen == rp_instances_gen)
+            i = (i + 1) & mask;
+         rp_instances[i] = slot;
+      }
+   }
 }
 
 tu_autotune::rp_entry *
@@ -1798,15 +1839,15 @@ tu_autotune::cmd_buf_ctx::generate_rp_key(const struct tu_render_pass *pass,
    /* When nearly identical renderpasses appear multiple times within the same command buffer, we need to generate a
     * unique hash for each instance to distinguish them. While this approach doesn't address identical renderpasses
     * across different command buffers, it is good enough in most cases.
+    *
+    * The first instance keeps the plain hash, the n-th (n >= 1) is salted with n.
     */
-   auto it = this->batch->all_renderpasses.find(key.hash);
-   if (it != this->batch->all_renderpasses.end()) {
-      key = rp_key(key, it->second);
-      if (record_instance)
-         it->second++;
-   } else {
-      if (record_instance)
-         this->batch->all_renderpasses[key.hash] = 1;
+   rp_instance_slot *slot = find_rp_instance(key.hash, record_instance);
+   if (slot && slot->count > 0)
+      key = rp_key(key, slot->count);
+   if (record_instance) {
+      slot->count++;
+      this->batch->has_renderpasses = true;
    }
 
    return key;
@@ -1927,10 +1968,31 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
    else
       key = cb_ctx.generate_rp_key(pass, framebuffer, cmd_buffer);
 
-   rp_history &history = *find_or_create_rp_history(key);
+   if (config.test(mod_flag::PREEMPT_OPTIMIZE) && !latency_info && !key_opt)
+      latency_info = get_rp_latency_info(key.hash, true);
+
+   /* rp_mutex is held from the lookup until the entry holds its own reference, so the reaper cannot free the history
+    * under us. Nothing below takes another lock (rp_latency_mutex is taken above, cleanup_latency_tracking() takes it
+    * before rp_mutex).
+    */
+   uint64_t now = coarse_now_ns.load(std::memory_order_relaxed);
+   std::shared_lock shared_lock(rp_mutex);
+   std::unique_lock<std::shared_mutex> unique_lock;
+   auto it = rp_histories.find(key);
+   if (it == rp_histories.end()) {
+      shared_lock.unlock();
+      unique_lock = std::unique_lock<std::shared_mutex>(rp_mutex);
+      it = rp_histories.find(key); /* Another thread may have created it while we were waiting for the lock. */
+      if (it == rp_histories.end()) {
+         it = rp_histories
+                 .emplace(std::piecewise_construct, std::forward_as_tuple(key), std::forward_as_tuple(key.hash, now))
+                 .first;
+      }
+   }
+   rp_history &history = it->second;
+   history.last_use_ts.store(now, std::memory_order_relaxed);
+
    if (config.test(mod_flag::PREEMPT_OPTIMIZE)) {
-      if (!latency_info && !key_opt)
-         latency_info = get_rp_latency_info(key.hash, true);
       assert(latency_info); /* Should always have it at this point. */
 
       if (!latency_info->seen_latency_spike) {
@@ -1947,29 +2009,30 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
          history.preempt_optimize.mark_as_latency_sensitive();
       }
    }
-   *rp_ctx = cb_ctx.attach_rp_entry(device, history, config, rp_state->drawcall_count);
 
+   render_mode mode = default_mode;
+   const char *reason = nullptr;
    if (config.test(mod_flag::PREEMPT_OPTIMIZE) && history.preempt_optimize.is_latency_sensitive()) {
       /* Try to mitigate the risk of high preemption latency by always using GMEM, which should break up any larger
        * draws into smaller ones with tiling.
        */
       at_log_base_h("high preemption latency risk, using GMEM", key.hash);
-      return forced("High preemption latency risk", render_mode::GMEM);
-   }
-
-   if (early_return_mode) {
+      mode = render_mode::GMEM;
+      reason = "High preemption latency risk";
+   } else if (early_return_mode) {
       at_log_base_h("%" PRIu32 " draw calls, using %s (late)", key.hash, rp_state->drawcall_count,
                     render_mode_str(*early_return_mode));
-      return forced(early_return_reason, *early_return_mode);
+      mode = *early_return_mode;
+      reason = early_return_reason;
+   } else if (config.is_enabled(algorithm::PROFILED) || config.is_enabled(algorithm::PROFILED_IMM)) {
+      mode = history.profiled.get_optimal_mode(history);
+   } else if (config.is_enabled(algorithm::BANDWIDTH)) {
+      mode = history.bandwidth.get_optimal_mode(history, cmd_state, pass, framebuffer, rp_state);
    }
 
-   if (config.is_enabled(algorithm::PROFILED) || config.is_enabled(algorithm::PROFILED_IMM))
-      return history.profiled.get_optimal_mode(history);
+   *rp_ctx = cb_ctx.attach_rp_entry(device, rp_history_handle(history), config, rp_state->drawcall_count);
 
-   if (config.is_enabled(algorithm::BANDWIDTH))
-      return history.bandwidth.get_optimal_mode(history, cmd_state, pass, framebuffer, rp_state);
-
-   return default_mode;
+   return reason ? forced(reason, mode) : mode;
 }
 
 uint32_t
@@ -1997,6 +2060,7 @@ tu_autotune::get_tile_size_divisor(struct tu_cmd_buffer *cmd_buffer)
       at_log_base_h("no RP history found, using tile_size_divisor=1", key.hash);
       return 1;
    }
+   history->last_use_ts.store(coarse_now_ns.load(std::memory_order_relaxed), std::memory_order_relaxed);
 
    uint32_t tile_size_divisor = history->preempt_optimize.get_tile_size_divisor();
 

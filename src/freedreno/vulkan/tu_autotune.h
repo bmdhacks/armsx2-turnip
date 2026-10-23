@@ -128,7 +128,7 @@ struct tu_autotune {
       uint32_t fence; /* The fence value which is used to signal the completion of the CB submission. This is used to
                          determine when the entries can be processed. */
       std::vector<std::unique_ptr<rp_entry>> entries;
-      std::unordered_map<uint64_t, uint32_t> all_renderpasses;
+      bool has_renderpasses = false; /* Whether any RP instance was recorded into this batch. */
 
       rp_batch_preempt_latency preempt_latency;
 
@@ -203,7 +203,7 @@ struct tu_autotune {
     *
     * Note: This should *NEVER* be used to calculate the hash itself as it would lead to the hash being calculated
     *       multiple times, rather than being calculated once and reused when there's multiple successive lookups like
-    *       with find_or_create_rp_history() and providing the hash to the rp_history constructor.
+    *       with get_optimal_mode() and providing the hash to the rp_history constructor.
     */
    struct rp_hash {
       constexpr size_t operator()(const rp_key &key) const noexcept
@@ -219,10 +219,14 @@ struct tu_autotune {
    std::shared_mutex rp_mutex;
    uint64_t last_reap_ts = 0;
 
-   /* Note: These will internally lock rp_mutex internally, no need to lock it. */
+   /* Monotonic time sampled once per submit, used for the history usage timestamps so that recording a render pass
+    * does not read the clock. The reaping and latency windows it feeds are seconds long.
+    */
+   std::atomic<uint64_t> coarse_now_ns;
+
+   /* Note: This will internally lock rp_mutex internally, no need to lock it. */
    rp_history_handle find_rp_history(const rp_key &key);
-   rp_history_handle find_or_create_rp_history(const rp_key &key);
-   void reap_old_rp_histories();
+   void reap_old_rp_histories(uint64_t now);
 
    /** Preemption Latency Tracking **/
 
@@ -251,7 +255,7 @@ struct tu_autotune {
    struct tu_draw_state reset_rp_hash_draw_state;
 
    bool supports_preempt_latency_tracking() const;
-   void cleanup_latency_tracking();
+   void cleanup_latency_tracking(uint64_t now);
    tu_autotune::rp_latency_info get_rp_latency_info(uint64_t rp_hash, bool unmark_sensitive);
    void write_preempt_counters_to_iova(struct tu_cs *cs,
                                        bool emit_selector,
@@ -277,6 +281,21 @@ struct tu_autotune {
     private:
       /* A batch of all entries from RPs within this CB. */
       std::shared_ptr<rp_entry_batch> batch;
+
+      /* How many times each RP hash was seen in this CB, for salting repeated instances. An open-addressed table that
+       * keeps its storage across resets; a slot is live only when its generation matches rp_instances_gen.
+       */
+      struct rp_instance_slot {
+         uint64_t hash;
+         uint32_t count;
+         uint32_t gen;
+      };
+      std::vector<rp_instance_slot> rp_instances;
+      uint32_t rp_instances_gen = 1;
+      uint32_t rp_instances_used = 0;
+
+      rp_instance_slot *find_rp_instance(uint64_t hash, bool insert);
+      void clear_rp_instances();
 
       /* Creates a new RP entry attached to this CB. */
       rp_entry *
