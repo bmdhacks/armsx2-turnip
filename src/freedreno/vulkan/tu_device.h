@@ -292,6 +292,12 @@ struct tu6_global
    uint64_t preemption_latency_cmp_scratch;
    uint64_t zero_64b;
 
+   /* a7xx: the last values this device wrote to RB_CLEAR_TARGET,
+    * RB_BUFFER_CNTL and RB_CCU_CACHE_CNTL, which the switch-back amble writes
+    * back (see tu7_emit_rb_regs_restore()). Indexed by tu7_rb_shadow_slot.
+    */
+   uint32_t preempt_rb_regs[4];
+
    struct bcolor_entry bcolor_builtin[TU_BORDER_COLOR_BUILTIN];
    struct bcolor_entry bcolor[];
 };
@@ -443,6 +449,10 @@ struct tu_device
    struct tu_cs_entry bin_preamble_entry, bin_preamble_bv_entry;
 
    struct tu_cs_entry switch_away_amble_entry, switch_back_amble_entry;
+   /* a7xx: tu7_emit_rb_regs_restore() alone, the switch-back amble of
+    * command buffers that do not track preemption latency.
+    */
+   struct tu_cs_entry rb_regs_restore_entry;
 
    struct tu_bo *vis_stream_bo;
    mtx_t vis_stream_mtx;

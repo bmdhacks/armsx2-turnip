@@ -718,14 +718,15 @@ emit_rb_ccu_cntl(struct tu_cs *cs, struct tu_device *dev, bool gmem)
          .color_offset = cfg->color_ccu_offset,
       ));
    } else if (CHIP == A7XX) {
-      tu_cs_emit_regs(cs, RB_CCU_CACHE_CNTL(CHIP,
-         .depth_offset_hi = depth_offset_hi,
-         .color_offset_hi = color_offset_hi,
-         .depth_cache_size = static_cast<enum a6xx_ccu_cache_size>(cfg->depth_cache_fraction),
-         .depth_offset = depth_offset,
-         .color_cache_size = color_cache_size,
-         .color_offset = color_offset
-      ));
+      tu7_emit_shadowed_rb_reg(cs, TU7_RB_SHADOW_CCU_CACHE_CNTL,
+         RB_CCU_CACHE_CNTL(A7XX,
+            .depth_offset_hi = depth_offset_hi,
+            .color_offset_hi = color_offset_hi,
+            .depth_cache_size = static_cast<enum a6xx_ccu_cache_size>(cfg->depth_cache_fraction),
+            .depth_offset = depth_offset,
+            .color_cache_size = color_cache_size,
+            .color_offset = color_offset
+         ));
    } else if (CHIP == A6XX) {
       tu_cs_emit_regs(cs, RB_CCU_CNTL(CHIP,
          .gmem_fast_clear_disable =
@@ -1561,8 +1562,15 @@ template <chip CHIP>
 static void
 tu7_emit_tile_render_begin_regs(struct tu_cs *cs)
 {
-   tu_cs_emit_regs(cs, RB_BUFFER_CNTL(CHIP, 0x0));
-   tu_cs_emit_regs(cs, RB_CLEAR_TARGET(CHIP, .clear_mode = CLEAR_MODE_GMEM));
+   if (CHIP == A7XX) {
+      tu7_emit_shadowed_rb_reg(cs, TU7_RB_SHADOW_BUFFER_CNTL,
+                               RB_BUFFER_CNTL(A7XX, 0x0));
+      tu7_emit_shadowed_rb_reg(cs, TU7_RB_SHADOW_CLEAR_TARGET,
+                               RB_CLEAR_TARGET(A7XX, .clear_mode = CLEAR_MODE_GMEM));
+   } else {
+      tu_cs_emit_regs(cs, RB_BUFFER_CNTL(CHIP, 0x0));
+      tu_cs_emit_regs(cs, RB_CLEAR_TARGET(CHIP, .clear_mode = CLEAR_MODE_GMEM));
+   }
 }
 
 /* Set always-identical registers used specifically for sysmem */
@@ -1570,7 +1578,7 @@ template <chip CHIP>
 static void
 tu7_emit_sysmem_render_begin_regs(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 {
-   tu_cs_emit_regs(cs, RB_BUFFER_CNTL(CHIP,
+   struct tu_reg_value buffer_cntl = RB_BUFFER_CNTL(CHIP,
       .z_sysmem = true,
       .s_sysmem = true,
       .rt0_sysmem = true,
@@ -1581,9 +1589,19 @@ tu7_emit_sysmem_render_begin_regs(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
       .rt5_sysmem = true,
       .rt6_sysmem = true,
       .rt7_sysmem = true,
-   ));
+   );
+   struct tu_reg_value clear_target =
+      RB_CLEAR_TARGET(CHIP, .clear_mode = CLEAR_MODE_SYSMEM);
 
-   tu_cs_emit_regs(cs, RB_CLEAR_TARGET(CHIP, .clear_mode = CLEAR_MODE_SYSMEM));
+   if (CHIP == A7XX) {
+      tu7_emit_shadowed_rb_reg(cs, TU7_RB_SHADOW_BUFFER_CNTL, buffer_cntl);
+      tu7_emit_shadowed_rb_reg(cs, TU7_RB_SHADOW_CLEAR_TARGET, clear_target);
+   } else {
+      tu_cs_emit_pkt4(cs, buffer_cntl.reg, 1);
+      tu_cs_emit(cs, (uint32_t) buffer_cntl.value);
+      tu_cs_emit_pkt4(cs, clear_target.reg, 1);
+      tu_cs_emit(cs, (uint32_t) clear_target.value);
+   }
 }
 
 template <chip CHIP>
@@ -2403,6 +2421,40 @@ tu_emit_bin_preamble(struct tu_device *dev, struct tu_cs *cs, bool bv)
    }
 }
 
+/* The a7xx switch-back amble: write back RB_CLEAR_TARGET, RB_BUFFER_CNTL and
+ * RB_CCU_CACHE_CNTL from the copies kept by tu7_emit_shadowed_rb_reg().
+ *
+ * The CP does not restore these registers when it switches back to this
+ * context in the middle of a command buffer. tu_emit_bin_preamble() rewrites
+ * them, but only after a switch at the end of a bin (CP_SET_MARKER with
+ * RM6_BIN_RENDER_END) with skipsaverestore. On an Adreno 722 under KGSL that
+ * preamble never runs: the CP switches to a higher priority context, such as
+ * SurfaceFlinger's GLES composition, inside the bins of a GMEM render pass,
+ * and the other context's values stay in these registers. RB_CLEAR_TARGET
+ * left in sysmem mode is the one that does the damage: the GMEM clears in the
+ * rest of the pass go to the attachment in memory instead of to the tile, and
+ * the pass comes out with its earlier bins holding the clear color or stale
+ * contents and only its last bin correct. This amble runs on every switch
+ * back into a command buffer, at any point, in GMEM and sysmem rendering
+ * alike.
+ *
+ * The copies are written from the command stream instead of being read from
+ * the registers on the way out: on the Adreno 722, CP_REG_TO_MEM in the
+ * switch-away amble reads all three as 0.
+ */
+static void
+tu7_emit_rb_regs_restore(struct tu_device *dev, struct tu_cs *cs)
+{
+   uint64_t va = dev->global_bo->iova + gb_offset(preempt_rb_regs);
+
+   cs->mem_to_reg(RB_CLEAR_TARGET(A7XX),
+                  va + 4 * TU7_RB_SHADOW_CLEAR_TARGET);
+   cs->mem_to_reg(RB_BUFFER_CNTL(A7XX),
+                  va + 4 * TU7_RB_SHADOW_BUFFER_CNTL);
+   cs->mem_to_reg(RB_CCU_CACHE_CNTL(A7XX),
+                  va + 4 * TU7_RB_SHADOW_CCU_CACHE_CNTL);
+}
+
 VkResult
 tu_init_bin_preamble(struct tu_device *device)
 {
@@ -2435,12 +2487,28 @@ tu_init_bin_preamble(struct tu_device *device)
       device->switch_away_amble_entry = tu_cs_end_sub_stream(&device->sub_cs, &preamble_cs);
    }
 
-   uint32_t switch_back_size = device->autotune->get_switch_back_amble_size();
-   if (switch_back_size > 0) {
-      result = tu_cs_begin_sub_stream(&device->sub_cs, switch_back_size, &preamble_cs);
+   bool rb_regs = device->physical_device->info->chip == 7;
+   const uint32_t rb_regs_size = 32;
+
+   if (rb_regs) {
+      result = tu_cs_begin_sub_stream(&device->sub_cs, rb_regs_size, &preamble_cs);
       if (result != VK_SUCCESS)
          return vk_startup_errorf(device->instance, result, "switch back amble");
 
+      tu7_emit_rb_regs_restore(device, &preamble_cs);
+      device->rb_regs_restore_entry = tu_cs_end_sub_stream(&device->sub_cs, &preamble_cs);
+   }
+
+   uint32_t switch_back_size = device->autotune->get_switch_back_amble_size();
+   if (switch_back_size > 0) {
+      result = tu_cs_begin_sub_stream(&device->sub_cs,
+                                      switch_back_size + (rb_regs ? rb_regs_size : 0),
+                                      &preamble_cs);
+      if (result != VK_SUCCESS)
+         return vk_startup_errorf(device->instance, result, "switch back amble");
+
+      if (rb_regs)
+         tu7_emit_rb_regs_restore(device, &preamble_cs);
       device->autotune->emit_switch_back_amble(&preamble_cs);
       device->switch_back_amble_entry = tu_cs_end_sub_stream(&device->sub_cs, &preamble_cs);
    }
@@ -2570,10 +2638,13 @@ tu_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
                             (1u << TU_PREDICATE_VTX_STATS_NOT_RUNNING));
    }
 
-   if (dev->switch_back_amble_entry.size > 0 && track_preempt_latency) {
+   const struct tu_cs_entry *back =
+      dev->switch_back_amble_entry.size > 0 && track_preempt_latency ?
+      &dev->switch_back_amble_entry : &dev->rb_regs_restore_entry;
+   if (back->size > 0) {
       tu_cs_emit_pkt7(cs, CP_SET_AMBLE, 3);
-      tu_cs_emit_qw(cs, dev->switch_back_amble_entry.bo->iova + dev->switch_back_amble_entry.offset);
-      tu_cs_emit(cs, CP_SET_AMBLE_2_DWORDS(dev->switch_back_amble_entry.size / sizeof(uint32_t)) |
+      tu_cs_emit_qw(cs, back->bo->iova + back->offset);
+      tu_cs_emit(cs, CP_SET_AMBLE_2_DWORDS(back->size / sizeof(uint32_t)) |
                         CP_SET_AMBLE_2_TYPE(PREAMBLE_AMBLE_TYPE));
    } else {
       tu_cs_emit_pkt7(cs, CP_SET_AMBLE, 3);

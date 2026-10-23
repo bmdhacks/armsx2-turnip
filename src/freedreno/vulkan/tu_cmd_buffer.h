@@ -1033,6 +1033,43 @@ _tu_create_fdm_bin_patchpoint(struct tu_cmd_buffer *cmd,
 
 VkResult tu_init_bin_preamble(struct tu_device *device);
 
+/* a7xx registers that the switch-back amble restores, and their slots in
+ * tu6_global::preempt_rb_regs. See tu7_emit_rb_regs_restore().
+ */
+enum tu7_rb_shadow_slot {
+   TU7_RB_SHADOW_CLEAR_TARGET,
+   TU7_RB_SHADOW_BUFFER_CNTL,
+   TU7_RB_SHADOW_CCU_CACHE_CNTL,
+};
+
+/* Record the value about to be written to a shadowed register. It goes
+ * before the register write, so that a switch between the two writes
+ * restores the new value and the register write then repeats it. BR only:
+ * BV can run ahead of BR into a later render pass.
+ */
+static inline void
+tu7_rb_shadow_write(struct tu_cs *cs, enum tu7_rb_shadow_slot slot,
+                    uint32_t value)
+{
+   tu_cond_exec_start(cs, CP_COND_REG_EXEC_0_MODE(THREAD_MODE) |
+                          CP_COND_REG_EXEC_0_BR);
+   tu_cs_emit_pkt7(cs, CP_MEM_WRITE, 3);
+   tu_cs_emit_qw(cs, cs->device->global_bo->iova +
+                     gb_offset(preempt_rb_regs) + 4 * slot);
+   tu_cs_emit(cs, value);
+   tu_cond_exec_end(cs);
+}
+
+/* Write a shadowed register and its copy. */
+static inline void
+tu7_emit_shadowed_rb_reg(struct tu_cs *cs, enum tu7_rb_shadow_slot slot,
+                         struct tu_reg_value reg)
+{
+   tu7_rb_shadow_write(cs, slot, (uint32_t) reg.value);
+   tu_cs_emit_pkt4(cs, reg.reg, 1);
+   tu_cs_emit(cs, (uint32_t) reg.value);
+}
+
 template <chip CHIP>
 void tu_init_hw_rp(struct tu_cs *cs);
 

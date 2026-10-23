@@ -1912,7 +1912,7 @@ r3d_setup(struct tu_cmd_buffer *cmd,
       tu_cs_emit_regs(cs, RB_CNTL(CHIP, .buffers_location = BUFFERS_IN_SYSMEM));
 
       if (CHIP >= A7XX) {
-         tu_cs_emit_regs(cs, RB_BUFFER_CNTL(CHIP,
+         struct tu_reg_value buffer_cntl = RB_BUFFER_CNTL(CHIP,
             .z_sysmem = true,
             .s_sysmem = true,
             .rt0_sysmem = true,
@@ -1923,7 +1923,11 @@ r3d_setup(struct tu_cmd_buffer *cmd,
             .rt5_sysmem = true,
             .rt6_sysmem = true,
             .rt7_sysmem = true,
-         ));
+         );
+         if (CHIP == A7XX)
+            tu7_rb_shadow_write(cs, TU7_RB_SHADOW_BUFFER_CNTL, (uint32_t) buffer_cntl.value);
+         tu_cs_emit_pkt4(cs, buffer_cntl.reg, 1);
+         tu_cs_emit(cs, (uint32_t) buffer_cntl.value);
       }
    }
 
@@ -4358,8 +4362,8 @@ clear_image_event_blit(struct tu_cmd_buffer *cmd,
 
    struct tu_cs *cs = &cmd->cs;
 
-   tu_cs_emit_regs(cs,
-                   RB_CLEAR_TARGET(A7XX, .clear_mode = CLEAR_MODE_SYSMEM));
+   tu7_emit_shadowed_rb_reg(cs, TU7_RB_SHADOW_CLEAR_TARGET,
+                            RB_CLEAR_TARGET(A7XX, .clear_mode = CLEAR_MODE_SYSMEM));
 
    tu_cs_emit_pkt4(cs, REG_A6XX_RB_RESOLVE_CNTL_0, 1);
    tu_cs_emit(cs, 0);
@@ -6083,6 +6087,11 @@ store_3d_blit(struct tu_cmd_buffer *cmd,
    cs->scratch_to_reg(GRAS_SC_BIN_CNTL(CHIP), tu_scratch(store_3d_blit.RB_CNTL), 1);
 
    if (CHIP >= A7XX) {
+      /* The value saved above is the GMEM rendering one, 0: this only runs
+       * inside a GMEM render pass, which sets RB_BUFFER_CNTL to 0.
+       */
+      if (CHIP == A7XX)
+         tu7_rb_shadow_write(cs, TU7_RB_SHADOW_BUFFER_CNTL, 0);
       cs->scratch_to_reg(RB_BUFFER_CNTL(CHIP), tu_scratch(store_3d_blit.RB_BUFFER_CNTL), 1);
    }
 }
