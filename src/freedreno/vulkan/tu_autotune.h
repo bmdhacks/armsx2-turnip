@@ -224,6 +224,21 @@ struct tu_autotune {
     */
    std::atomic<uint64_t> coarse_now_ns;
 
+   /* TU_AUTOTUNE_STATS: once a second, log how many render passes reached get_optimal_mode, how many were tuned,
+    * measured and sent to GMEM, and how many histories were created. Counted only when enabled.
+    */
+   struct stats_t {
+      std::atomic<uint32_t> passes = 0;
+      std::atomic<uint32_t> tuned = 0;
+      std::atomic<uint32_t> measured = 0;
+      std::atomic<uint32_t> gmem = 0;
+      std::atomic<uint32_t> new_histories = 0;
+      uint32_t submits = 0;
+      uint64_t last_log_ns = 0;
+   } stats;
+   bool stats_enabled = false;
+   void log_stats(uint64_t now);
+
    /* Note: This will internally lock rp_mutex internally, no need to lock it. */
    rp_history_handle find_rp_history(const rp_key &key);
    void reap_old_rp_histories(uint64_t now);
