@@ -82,16 +82,24 @@ PREFER_SYSMEM on the Adreno 610`).** On a Snapdragon 662 a PS2 replay took
 `TU_AUTOTUNE_ALGO` and the drirc option still override it.
 
 **Adreno 722 (Snapdragon 7 Gen 4 / Dragonwing Q-7790, Retroid Pocket Duo).**
-Three commits and one follow-up. Upstream's A722 table entry is Qualcomm's
+Five commits. Upstream's A722 table entry is Qualcomm's
 placeholder. Ours copies the A720, because Qualcomm's KGSL source treats the two
 as one family (same SP counts, same clusters, same firmware), with two CCUs and
 32-row tile alignment. The follow-up writes `RB_RBP_CNTL` and `RB_DBG_ECO_CNTL`
 as 0 on the A722: upstream's magic-register cleanup stopped writing them on the
 A710 and A720 (apparently unintended), and the A722 pack tested on a Duo wrote
-them. The autotuner defaults to `PREFER_SYSMEM` on chip id `0x43020100`, because
-community A722 drivers report glitched UI draws in GMEM. And `u_gralloc` reads
-the Qualcomm UBWC flag from buffer handles that carry no `gmsm` magic, which is
-reported for newer Qualcomm gralloc versions; without it the swapchain image is
+them. The autotuner defaults to `BANDWIDTH` with the `TUNE_SMALL` flag on chip id
+`0x43020100`. Measured on a Duo (17 ARMSX2 GS dumps at 2x, GPU-inclusive time per
+drawn frame), that is faster than `PREFER_SYSMEM` by more than 2% on 13 dumps (mean
+-6.7%, median -7.7%) and slower on Burnout 3 (+2.2%) and Jak II (+3.2%), with
+identical pixels on all 17; forcing GMEM costs +93% on Burnout 3. `TU_AUTOTUNE_ALGO`
+and the drirc option replace the algorithm, and a set `TU_AUTOTUNE_FLAGS` replaces
+the default flags (`TU_AUTOTUNE_FLAGS=none` leaves none). The default was first
+`PREFER_SYSMEM`, chosen before any measurement because community A722 drivers
+report glitched UI draws in GMEM; the replays did not draw the app's own UI and
+post-processing passes, so that report is still untested here. And `u_gralloc`
+reads the Qualcomm UBWC flag from buffer handles that carry no `gmsm` magic, which
+is reported for newer Qualcomm gralloc versions; without it the swapchain image is
 laid out differently from the buffer. The commit messages say which numbers come
 from other people's reports and not from a device.
 
