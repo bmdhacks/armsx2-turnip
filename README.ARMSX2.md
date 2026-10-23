@@ -117,6 +117,25 @@ same and is still made on every instance. The third logs per-second counts when
 `TU_AUTOTUNE_STATS=1`. Not yet measured on a device; the design and the test plan are
 in the ARMSX2 umbrella, `devs/bmdhacks/campaigns/duo-gmem-2026-10-22/autotune-cpu-design.md`.
 
+**Register restore after a context switch on Adreno 7xx (`tu: restore the a7xx
+RB clear/buffer/CCU registers when switching back into a command buffer`).** On
+an Adreno 722 the GPU switches to a higher priority context, such as Android's
+compositor, in the middle of a tiled (GMEM) render pass. When it switches back,
+it does not restore the register that says whether clears go to tile memory or
+to memory, and the compositor left it set to memory. The rest of the pass then
+clears the attachment in memory instead of the tile, and the pass comes out
+with all but its last tile black or stale, which is what the Burnout 3 and
+God of War II flicker with pack `axfl2-004` looks like. Turnip already rewrites these registers
+after a switch at the end of a tile, but on this GPU that never happens, so
+its tile restore code never runs. The fix keeps a copy of the three registers
+in memory whenever Turnip writes them, and gives the GPU a small command list
+to run on every switch back that writes the copies into the registers. It
+applies to all Adreno 7xx and costs nothing unless a switch happens. Measured
+on a Retroid Pocket Duo with a GS dump replayed while a second, high-priority
+GLES program draws: GMEM arms differed from sysmem in 6 to 58 of 80 frames
+per run without the change and in none of 480 frames with it. Replay time
+per frame did not change measurably (within 0.8% on three dumps).
+
 **Wayland build switch (`wsi/wayland: let a build opt out of wl_fixes …`).** Lets
 the ARM Linux build target an older `libwayland` than the build host has. It changes
 nothing unless the build defines `WSI_WL_NO_FIXES`.
