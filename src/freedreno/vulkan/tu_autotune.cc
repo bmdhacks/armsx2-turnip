@@ -1693,6 +1693,9 @@ tu_autotune::on_submit(struct tu_cmd_buffer **cmd_buffers, uint32_t cmd_buffer_c
    uint64_t now = os_time_get_nano();
    coarse_now_ns.store(now, std::memory_order_relaxed);
 
+   if (stats_enabled)
+      log_stats(now);
+
    process_entries();
    cleanup_latency_tracking(now);
    reap_old_rp_histories(now);
@@ -1732,11 +1735,43 @@ tu_autotune::on_submit(struct tu_cmd_buffer **cmd_buffers, uint32_t cmd_buffer_c
    return fence_cs;
 }
 
+void
+tu_autotune::log_stats(uint64_t now)
+{
+   constexpr uint64_t LOG_INTERVAL_NS = 1'000'000'000;
+
+   stats.submits++;
+   if (stats.last_log_ns == 0)
+      stats.last_log_ns = now;
+   if (now - stats.last_log_ns < LOG_INTERVAL_NS)
+      return;
+
+   size_t histories;
+   {
+      std::shared_lock lock(rp_mutex);
+      histories = rp_histories.size();
+   }
+
+   mesa_logi("autotune stats: %.2f s, %" PRIu32 " submits, %" PRIu32 " passes, %" PRIu32 " tuned, %" PRIu32
+             " measured, %" PRIu32 " gmem, %" PRIu32 " new histories, %zu histories",
+             (now - stats.last_log_ns) / 1e9, stats.submits, stats.passes.exchange(0, std::memory_order_relaxed),
+             stats.tuned.exchange(0, std::memory_order_relaxed), stats.measured.exchange(0, std::memory_order_relaxed),
+             stats.gmem.exchange(0, std::memory_order_relaxed),
+             stats.new_histories.exchange(0, std::memory_order_relaxed), histories);
+
+   stats.submits = 0;
+   stats.last_log_ns = now;
+}
+
 tu_autotune::tu_autotune(struct tu_device *device, VkResult &result)
     : device(device), supported_mod_flags(get_supported_mod_flags(device)), active_config(get_env_config()),
       coarse_now_ns(os_time_get_nano())
 {
    tu_bo_suballocator_init(&suballoc, device, 128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE, "autotune_suballoc");
+
+   stats_enabled = debug_get_bool_option("TU_AUTOTUNE_STATS", false);
+   if (stats_enabled)
+      mesa_logi("autotune: %s", active_config.load().to_string().c_str());
 
    if (supports_preempt_latency_tracking()) {
       const char *fail_reason = nullptr;
@@ -1925,6 +1960,9 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
    /* Just to ensure a segfault for accesses, in case we don't set it. */
    *rp_ctx = nullptr;
 
+   if (stats_enabled)
+      stats.passes.fetch_add(1, std::memory_order_relaxed);
+
    /* Records why the mode wasn't the autotuner's to pick, for the trace and for anything else that wants to tell a
     * tuned RP apart from one whose mode was decided for it.
     */
@@ -2048,6 +2086,8 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
                  .emplace(std::piecewise_construct, std::forward_as_tuple(key), std::forward_as_tuple(key.hash, now))
                  .first;
          created = true;
+         if (stats_enabled)
+            stats.new_histories.fetch_add(1, std::memory_order_relaxed);
       }
    }
    rp_history &history = it->second;
@@ -2103,6 +2143,14 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
    /* An unmeasured pass gets no entry: no result buffer, no samples-passed events, nothing to process at submit. */
    if (measure)
       *rp_ctx = cb_ctx.attach_rp_entry(device, rp_history_handle(history), config, rp_state->drawcall_count);
+
+   if (stats_enabled) {
+      stats.tuned.fetch_add(1, std::memory_order_relaxed);
+      if (measure)
+         stats.measured.fetch_add(1, std::memory_order_relaxed);
+      if (mode == render_mode::GMEM)
+         stats.gmem.fetch_add(1, std::memory_order_relaxed);
+   }
 
    return reason ? forced(reason, mode) : mode;
 }
