@@ -1157,7 +1157,11 @@ add_gpus([
         GPUId(chip_id=0xffff43020100, name="FD722"),
     ], A6xxGPUInfo(
         CHIP.A7XX,
-        [a7xx_base, a7xx_gen1],
+        # Qualcomm's Vulkan and GLES drivers on the A722 both write
+        # TPL1_DBG_ECO_CNTL1 without the TP UBWC flag hint, and SurfaceFlinger
+        # composes with the GLES driver. Match them, as a7xx_gen2 does for
+        # the A740.
+        [a7xx_base, a7xx_gen1, GPUProps(enable_tp_ubwc_flag_hint = False)],
         num_ccu = 2,
         tile_align_w = 64,
         tile_align_h = 32,
