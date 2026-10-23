@@ -1124,16 +1124,34 @@ add_gpus([
 # has_lpac stays as in a7xx_base: the A720 and A722 have no LPAC, but Turnip
 # only reads the flag for a6xx.
 #
-# a720_raw_magic_regs are used, plus RB_RBP_CNTL and RB_DBG_ECO_CNTL written as
-# 0.  Those two were once written for the A710 and A720 as well, through
-# a730_magic_regs ("RB_* magic all zero like A730"); upstream's "Drop
-# magic_regs" series moved the values into the A730 and A740 raw tables only,
-# so a720_raw_magic_regs no longer carries them and the A722 would stop writing
-# them.  Written explicitly here to keep what the A722 pack tested on a Retroid
-# Pocket Duo did.  A third-party A722 table
-# (Vauzi-17/710, from unpublished blob traces) differs in PC_MODE_CNTL
-# (0x3f), UCHE_CACHE_WAYS (0), SP_CHICKEN_BITS_2 (0x10), SP_CHICKEN_BITS
-# (0x400) and RB_CCU_DBG_ECO_CNTL (0x80000); those are not used here.
+# The magic registers are the values Qualcomm's own Vulkan driver (512.800.73)
+# writes on a Retroid Pocket Duo, read from its command stream with the
+# blobcap capture tool (ARMSX2 umbrella,
+# devs/bmdhacks/campaigns/duo-driver-next-2026-10-23/): the A720 table with
+# UCHE_CACHE_WAYS 0 (A720 table 0x40004), SP_CHICKEN_BITS 0x400 (0x1400; the
+# EOLM bit is still added from has_eolm_eogm), SP_CHICKEN_BITS_2 0x10 (0),
+# SP_UNKNOWN_AB01 0 (1) and RB_CCU_DBG_ECO_CNTL 0x80000 (0), plus RB_RBP_CNTL
+# and RB_DBG_ECO_CNTL written as 0. Qualcomm's GLES driver writes the same
+# values except SP_UNKNOWN_AB01, which it sets to 1. KGSL sets
+# SP_CHICKEN_BITS_2 bit 4 on some gen7 parts to "disable L0 STCHE to avoid
+# deadlock in GPU pipeline"; the A722 driver sets it unconditionally.
+# RB_RBP_CNTL and RB_DBG_ECO_CNTL were once written for the A710 and A720 as
+# well, through a730_magic_regs; upstream's "Drop magic_regs" series moved the
+# values into the A730 and A740 raw tables only, so the A720 table no longer
+# carries them.
+a722_raw_magic_regs = [
+        [reg, {
+            A6XXRegs.REG_A6XX_UCHE_CACHE_WAYS: 0x00000000,
+            A6XXRegs.REG_A6XX_SP_CHICKEN_BITS: 0x00000400,
+            A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_2: 0x00000010,
+            A6XXRegs.REG_A7XX_SP_UNKNOWN_AB01: 0x00000000,
+            A6XXRegs.REG_A7XX_RB_CCU_DBG_ECO_CNTL: 0x00080000,
+        }.get(reg, value)] for reg, value in a720_raw_magic_regs
+    ] + [
+        [A6XXRegs.REG_A6XX_RB_RBP_CNTL,       0x0],
+        [A6XXRegs.REG_A6XX_RB_DBG_ECO_CNTL,   0x0],
+    ]
+
 add_gpus([
         GPUId(chip_id=0x43020100, name="FD722"),
         GPUId(chip_id=0xffff43020100, name="FD722"),
@@ -1150,10 +1168,7 @@ add_gpus([
         wave_granularity = 2,
         fibers_per_sp = 128 * 2 * 16,
         highest_bank_bit = 15,
-        raw_magic_regs = a720_raw_magic_regs + [
-            [A6XXRegs.REG_A6XX_RB_RBP_CNTL,       0x0],
-            [A6XXRegs.REG_A6XX_RB_DBG_ECO_CNTL,   0x0],
-        ],
+        raw_magic_regs = a722_raw_magic_regs,
     ))
 
 add_gpus([
