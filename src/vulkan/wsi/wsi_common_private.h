@@ -189,6 +189,10 @@ struct wsi_image {
    uint32_t row_pitches[4];
 #ifndef _WIN32
    int dma_buf_fd;
+   /* The sync file of the last present's GPU work, or -1, for a backend
+    * that hands it to the kernel itself (see present_sync_semaphore).
+    */
+   int present_sync_fd;
 #endif
    void *cpu_map;
 
@@ -250,6 +254,16 @@ struct wsi_swapchain {
     * create_sync_for_memory().
     */
    VkSemaphore dma_buf_semaphore;
+
+   /**
+    * Optional semaphore for a backend that passes the present's completion
+    * to the kernel as an explicit fence (wsi_display's IN_FENCE_FD), used
+    * when dma_buf_semaphore is not available and the driver does no
+    * implicit sync of its own (wsi_device::no_dma_buf_implicit_sync).  It
+    * is signaled by the pre-present vkQueueSubmit2, and its sync file is
+    * left in the image's present_sync_fd.
+    */
+   VkSemaphore present_sync_semaphore;
 
    struct wsi_image_info image_info;
    uint32_t image_count;
@@ -507,6 +521,13 @@ wsi_drm_wait_for_explicit_sync_release(struct wsi_swapchain *chain,
 
 VkResult
 wsi_drm_init_swapchain_implicit_sync(struct wsi_swapchain *chain);
+
+bool
+wsi_drm_init_swapchain_present_sync_file(struct wsi_swapchain *chain);
+
+void
+wsi_drm_export_present_sync_file(const struct wsi_swapchain *chain,
+                                 struct wsi_image *image);
 
 #endif
 

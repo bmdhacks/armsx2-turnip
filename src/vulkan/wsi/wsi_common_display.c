@@ -147,6 +147,7 @@ enum plane_property {
    SRC_W,
    SRC_H,
    FB_ID,
+   IN_FENCE_FD,
    PLANE_PROPERTY_MAX,
 };
 
@@ -356,6 +357,8 @@ find_properties(struct wsi_display_connector *connector, uint32_t count_props, u
    } else if (type == DRM_MODE_OBJECT_CONNECTOR) {
       prop_id[HDR_OUTPUT_METADATA] = -1;
       prop_id[Colorspace] = -1;
+   } else if (type == DRM_MODE_OBJECT_PLANE) {
+      prop_id[IN_FENCE_FD] = -1;
    }
 
    /* Walk the list of properties seeing if their names match one of the
@@ -393,6 +396,7 @@ find_properties(struct wsi_display_connector *connector, uint32_t count_props, u
          PROPERTY(SRC_Y);
          PROPERTY(SRC_W);
          PROPERTY(SRC_H);
+         PROPERTY(IN_FENCE_FD);
          break;
       }
 #undef PROPERTY
@@ -3008,12 +3012,27 @@ drm_atomic_commit(wsi_display_connector *connector, struct wsi_display_image *im
    drmModeAtomicAddProperty(req, plane_id, prop[CRTC_W], mode->hdisplay);
    drmModeAtomicAddProperty(req, plane_id, prop[CRTC_H], mode->vdisplay);
 
+   /* The kernel waits for this fence before it flips to the image (see
+    * wsi_drm_init_swapchain_present_sync_file()).  It takes its own
+    * reference, so the fd is closed once the commit has been sent.
+    */
+   const bool in_fence = !test_only && image->base.present_sync_fd >= 0 &&
+                         prop[IN_FENCE_FD] != (uint32_t) -1;
+   if (in_fence)
+      drmModeAtomicAddProperty(req, plane_id, prop[IN_FENCE_FD], image->base.present_sync_fd);
+
    if (test_only) {
       flags |= DRM_MODE_ATOMIC_TEST_ONLY;
       flags &= ~DRM_MODE_PAGE_FLIP_EVENT;
    }
 
    ret = drmModeAtomicCommit(fd, req, flags, image);
+
+   if (in_fence) {
+      close(image->base.present_sync_fd);
+      image->base.present_sync_fd = -1;
+   }
+
    if (ret)
       goto out;
 
@@ -3564,6 +3583,12 @@ wsi_display_surface_create_swapchain(
     */
    if (create_info->imageColorSpace != VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
       wsi_display_set_hdr_metadata(&chain->base, &chain->hdr_metadata);
+
+   /* Without implicit sync, fence each flip on the present's GPU work
+    * through the plane's IN_FENCE_FD, if the plane has one.
+    */
+   if (display_mode->connector->plane_property[IN_FENCE_FD] != (uint32_t) -1)
+      wsi_drm_init_swapchain_present_sync_file(&chain->base);
 
    *swapchain_out = &chain->base;
 

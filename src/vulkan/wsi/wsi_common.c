@@ -683,6 +683,8 @@ wsi_swapchain_finish(struct wsi_swapchain *chain)
    }
    chain->wsi->DestroySemaphore(chain->device, chain->dma_buf_semaphore,
                                 &chain->alloc);
+   chain->wsi->DestroySemaphore(chain->device, chain->present_sync_semaphore,
+                                &chain->alloc);
    chain->wsi->DestroySemaphore(chain->device, chain->present_id_timeline,
                                 &chain->alloc);
 
@@ -893,6 +895,7 @@ wsi_create_image(const struct wsi_swapchain *chain,
 
 #ifndef _WIN32
    image->dma_buf_fd = -1;
+   image->present_sync_fd = -1;
    for (uint32_t i = 0; i < WSI_ES_COUNT; i++)
       image->explicit_sync[i].fd = -1;
 #endif
@@ -1031,6 +1034,8 @@ wsi_destroy_image(const struct wsi_swapchain *chain,
 #ifndef _WIN32
    if (image->dma_buf_fd >= 0)
       close(image->dma_buf_fd);
+   if (image->present_sync_fd >= 0)
+      close(image->present_sync_fd);
 #endif
 
    if (image->explicit_sync[WSI_ES_ACQUIRE].semaphore) {
@@ -2670,6 +2675,13 @@ wsi_common_queue_present(const struct wsi_device *wsi,
             .semaphore = swapchain->dma_buf_semaphore,
          };
          wsi_image_signal_info_add_semaphore(&image_signal_infos[i], sem_info);
+      } else if (swapchain->present_sync_semaphore != VK_NULL_HANDLE) {
+         const VkSemaphoreSubmitInfo sem_info = {
+            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+            .stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+            .semaphore = swapchain->present_sync_semaphore,
+         };
+         wsi_image_signal_info_add_semaphore(&image_signal_infos[i], sem_info);
       }
 
       uint64_t present_id = 0;
@@ -2910,6 +2922,11 @@ wsi_common_queue_present(const struct wsi_device *wsi,
          UNREACHABLE("We shouldn't have a dma-buf semaphore without libdrm");
 #endif
       }
+
+#ifdef HAVE_LIBDRM
+      if (swapchain->present_sync_semaphore != VK_NULL_HANDLE)
+         wsi_drm_export_present_sync_file(swapchain, image);
+#endif
 
       if (wsi->sw) {
          wsi->WaitForFences(vk_device_to_handle(dev),
