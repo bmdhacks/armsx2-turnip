@@ -1789,7 +1789,19 @@ tu_physical_device_init(struct tu_physical_device *device,
          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 
-      if (instance->drirc.misc.override_uncached_as_cache_coherent) {
+      /* ARMSX2: on the Adreno 722 (KGSL chip id 0x43020100) allocate the
+       * uncached host-visible type as cached-coherent memory too, as
+       * Qualcomm's own driver allocates every object there (KGSL
+       * IOCOHERENT with a cached CPU mapping). KGSL only maps memory
+       * IO-coherent for the GPU when the CPU mapping is cached, and
+       * replaying 17 ARMSX2 GS dumps on a Retroid Pocket Duo the GPU time
+       * per frame drops by 7% (median) and up to 27% (God of War II) with
+       * identical pixels. The win comes from the application's
+       * allocations (render targets, textures, buffers); the driver's own
+       * buffers alone change nothing measurable.
+       */
+      const bool a722 = (device->dev_id.chip_id & 0xffffffff) == 0x43020100;
+      if (instance->drirc.misc.override_uncached_as_cache_coherent || a722) {
           /* Retain this memory type index to override later. */
           device->preferred_uncached_as_cached_index = device->memory.type_count;
       }
