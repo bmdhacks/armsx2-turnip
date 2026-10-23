@@ -274,6 +274,7 @@ tu_autotune::get_env_config()
    static config_t at_config;
    std::call_once(once, [&] {
       algorithm algo = algorithm::DEFAULT;
+      uint32_t mod_flags = 0;
 
       /* ARMSX2: default to PREFER_SYSMEM on the Adreno 610. Replaying a Black (PS2) GS dump on a Snapdragon 662,
        * BANDWIDTH sent the frame's few large blended render passes (~4,800 draws each) to GMEM and the GPU took
@@ -284,14 +285,23 @@ tu_autotune::get_env_config()
       if (fd_dev_gpu_id(&device->physical_device->dev_id) == 610)
          algo = algorithm::PREFER_SYSMEM;
 
-      /* ARMSX2: also default to PREFER_SYSMEM on the Adreno 722 (KGSL chip id 0x43020100; the msm kernel adds fuse
-       * bits above bit 31). UNVERIFIED: nothing has run on an A722 yet. Community A722 drivers report GMEM
-       * rendering glitches (broken 2D/UI draws) and recommend sysmem, and the A610 measurement above showed the
-       * default algorithm sending large blended passes to GMEM for a loss. Measure GMEM against sysmem on the
-       * device before keeping this. TU_AUTOTUNE_ALGO and the drirc option below still override it.
+      /* ARMSX2: on the Adreno 722 (KGSL chip id 0x43020100; the msm kernel adds fuse bits above bit 31) default to
+       * BANDWIDTH with TUNE_SMALL, so the chooser also decides the passes of fewer than 5 draws. Measured 2026-10-22
+       * on a Retroid Pocket Duo: 17 ARMSX2 GS dumps at 2x, GPU-inclusive ms per drawn frame, 3 interleaved reps.
+       * Against PREFER_SYSMEM it was faster by more than 2% on 13 dumps (mean -6.7%, median -7.7%; God of War II
+       * -9.5%, Shadow of the Colossus -9 to -17%) and slower on Burnout 3 (+2.2%) and Jak II (+3.2%), where the GS
+       * thread's CPU time rose, not the GPU's. The output was pixel-identical on all 17 dumps (8,770 frames).
+       * Forcing GMEM everywhere was +93% on Burnout 3. Not covered: the app's own UI and post-processing passes,
+       * which a surfaceless replay never draws and which community drivers report glitching in GMEM.
+       * Record: ARMSX2 umbrella devs/bmdhacks/campaigns/duo-gmem-2026-10-22/.
+       *
+       * TU_AUTOTUNE_ALGO and the drirc option replace the algorithm. TU_AUTOTUNE_FLAGS replaces the flags when it is
+       * set, so any value that does not name tune_small drops it (TU_AUTOTUNE_FLAGS=none leaves no flags).
        */
-      if ((device->physical_device->dev_id.chip_id & 0xffffffff) == 0x43020100)
-         algo = algorithm::PREFER_SYSMEM;
+      if ((device->physical_device->dev_id.chip_id & 0xffffffff) == 0x43020100) {
+         algo = algorithm::BANDWIDTH;
+         mod_flags = static_cast<uint32_t>(mod_flag::TUNE_SMALL);
+      }
 
       const char *algo_str = os_get_option("TU_AUTOTUNE_ALGO");
       std::string_view algo_strv;
@@ -322,7 +332,6 @@ tu_autotune::get_env_config()
 
       /* Parse the flags from the environment variable. */
       const char *flags_env_str = os_get_option("TU_AUTOTUNE_FLAGS");
-      uint32_t mod_flags = 0;
       if (flags_env_str) {
          static const struct debug_control tu_at_flags_control[] = {
             { "big_gmem", static_cast<uint32_t>(mod_flag::BIG_GMEM) },
