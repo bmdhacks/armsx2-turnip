@@ -287,6 +287,14 @@ tu_autotune::get_env_config()
       if (fd_dev_gpu_id(&device->physical_device->dev_id) == 610)
          algo = algorithm::PREFER_SYSMEM;
 
+      /* ARMSX2: the same default on the Adreno 613 (Anbernic RG 55G1). BANDWIDTH sent Black's and Shadow of the
+       * Colossus's large blended passes to GMEM, and PREFER_SYSMEM took 21% and 7% off their replay frame times (17
+       * GS dumps at 1x, 3 interleaved reps; no dump slower beyond noise, pixels identical on all 17).
+       * TU_AUTOTUNE_ALGO=bandwidth restores the previous default.
+       */
+      if (fd_dev_gpu_id(&device->physical_device->dev_id) == 613)
+         algo = algorithm::PREFER_SYSMEM;
+
       /* ARMSX2: on the Adreno 722 (KGSL chip id 0x43020100; the msm kernel adds fuse bits above bit 31) default to
        * BANDWIDTH with TUNE_SMALL, so the chooser also decides the passes of fewer than 5 draws. Measured 2026-10-22
        * on a Retroid Pocket Duo: 17 ARMSX2 GS dumps at 2x, GPU-inclusive ms per drawn frame, 3 interleaved reps.
