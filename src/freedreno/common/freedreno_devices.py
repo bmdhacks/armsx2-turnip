@@ -319,10 +319,38 @@ add_gpus([
 add_gpus([
         GPUId(608),
         GPUId(612),
-        GPUId(613),
     ], A6xxGPUInfo(
         CHIP.A6XX,
         [a6xx_base, a6xx_gen1_low, GPUProps(reg_size_vec4 = 32)],
+        num_ccu = 1,
+        tile_align_w = 32,
+        tile_align_h = 16,
+        tile_max_w = 1024,
+        tile_max_h = 1024,
+        num_vsc_pipes = 16,
+        cs_shared_mem_size = 16 * 1024,
+        wave_granularity = 1,
+        fibers_per_sp = 128 * 16,
+        highest_bank_bit = 13,
+        ubwc_swizzle = 0x7,
+        macrotile_mode = 0,
+        raw_magic_regs = a6xx_gen1_low_raw_magic_regs,
+    ))
+
+add_gpus([
+        # ARMSX2: the Qualcomm driver runs every fragment shader at THREAD128 on
+        # the Adreno 613 (SP_PS_CNTL_0 / SP_PS_WAVE_CNTL in its command stream on
+        # an Anbernic RG 55G1). With double threadsize and the PREFER_SYSMEM
+        # default below, 17 PS2 GS replays there took 7.8% (1x) and 17.6% (2x)
+        # less time per frame on average than before, none slower, every
+        # presented frame identical. Only the 613 was measured; the 608 and 612
+        # keep the gen1-low default.
+        # FD_DEV_FEATURES=supports_double_threadsize=0 restores the old behaviour.
+        GPUId(613),
+    ], A6xxGPUInfo(
+        CHIP.A6XX,
+        [a6xx_base, a6xx_gen1_low, GPUProps(reg_size_vec4 = 32,
+                                                  supports_double_threadsize = True)],
         num_ccu = 1,
         tile_align_w = 32,
         tile_align_h = 16,
