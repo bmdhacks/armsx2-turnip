@@ -82,7 +82,7 @@ PREFER_SYSMEM on the Adreno 610`).** On a Snapdragon 662 a PS2 replay took
 `TU_AUTOTUNE_ALGO` and the drirc option still override it.
 
 **Adreno 722 (Snapdragon 7 Gen 4 / Dragonwing Q-7790, Retroid Pocket Duo).**
-Five commits. Upstream's A722 table entry is Qualcomm's
+Five commits (the stock-driver changes below came later). Upstream's A722 table entry is Qualcomm's
 placeholder. Ours copies the A720, because Qualcomm's KGSL source treats the two
 as one family (same SP counts, same clusters, same firmware), with two CCUs and
 32-row tile alignment. The follow-up writes `RB_RBP_CNTL` and `RB_DBG_ECO_CNTL`
@@ -150,6 +150,35 @@ without the change and in none of 240 frames per arm, on each of Burnout 3 and G
 of War II, with it (default autotuning and forced GMEM). Replay time per frame did
 not change measurably (within 0.8% on three dumps). Only the A722 was tested for
 the flicker itself.
+
+**Adreno 722 setup from Qualcomm's own driver (`freedreno: use the Qualcomm
+driver's magic register values on the Adreno 722`, `freedreno: turn the TP UBWC
+flag hint off on the Adreno 722`, `tu: allocate uncached host-visible memory as
+cached-coherent on the Adreno 722`).** Three changes found by capturing the command
+stream and allocation calls of Qualcomm's Vulkan driver on a Retroid Pocket Duo and
+comparing them with Turnip's. The A722 table now uses Qualcomm's values for five
+configuration registers (`UCHE_CACHE_WAYS`, `SP_CHICKEN_BITS`, `SP_CHICKEN_BITS_2`,
+`SP_UNKNOWN_AB01`, `RB_CCU_DBG_ECO_CNTL`; the A720 table differed there) and writes
+the texture unit's UBWC flag hint off, as Qualcomm's Vulkan and GLES drivers do
+(SurfaceFlinger composes with the GLES one). Neither changed speed or pixels. The
+third is the speed change: Qualcomm allocates every object IO-coherent with a cached
+CPU mapping, while Turnip allocated its main memory type write-combined, which KGSL
+maps non-coherent for the GPU. On the A722 that type is now allocated cached-coherent,
+what the `tu_override_uncached_as_cache_coherent` drirc option does elsewhere. The
+gain comes from the application's memory (render targets, textures, buffers), not
+from the driver's own buffers. Measured on the Duo with the three together against
+`axfl2-005`, on 17 ARMSX2 GS dumps at 2x (GPU-inclusive time per drawn frame, three
+interleaved repetitions): mean -8.6%, median -6.5%, God of War II -26% and -22%,
+Black -17%, Metal Gear Solid 3 -13%, Shadow of the Colossus -7 to -10%, no dump slower
+by more than 1.1% (Ratchet & Clank: Up Your Arsenal, within its noise). Final frames
+were pixel-identical on all 17 dumps, default and forced GMEM, and identical to
+sysmem under a second, high-priority GPU client (0 of 640 frames wrong; the unfixed
+pack `axfl2-004` failed in the same session). Registers that Qualcomm's bin preamble
+restores and Turnip's does not (point size, dither, flat-shading mode, stereo
+rendering, private-memory bases) were checked on the GPU: the draw-state registers
+are back before every draw that renders, the others do not affect what ARMSX2 draws,
+so no restore was added. The record is in the ARMSX2 umbrella,
+`devs/bmdhacks/campaigns/duo-driver-next-2026-10-23/stock-diff/`.
 
 **Wayland build switch (`wsi/wayland: let a build opt out of wl_fixes …`).** Lets
 the ARM Linux build target an older `libwayland` than the build host has. It changes
