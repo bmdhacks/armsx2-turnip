@@ -41,6 +41,7 @@
 #include "util/libsync.h"
 #include "util/log.h"
 #include "util/os_file.h"
+#include "util/os_misc.h"
 #include "util/u_gralloc/u_gralloc.h"
 
 #include <hardware/gralloc.h>
@@ -53,6 +54,9 @@
 #endif
 
 #include <unistd.h>
+
+#include <inttypes.h>
+#include <stdlib.h>
 
 static struct u_gralloc *_gralloc;
 
@@ -458,12 +462,43 @@ setup_gralloc0_usage(VkFormat format, VkImageUsageFlags image_usage,
    return VK_SUCCESS;
 }
 
+/* Extra gralloc usage bits to ask for on swapchain buffers, from TU_SWAPCHAIN_UBWC (on Android,
+ * the property debug.mesa.tu.swapchain.ubwc). The stock Adreno driver allocates its swapchain
+ * images compressed (Qualcomm UBWC); Turnip asks for plain ones. On a panel whose orientation
+ * differs from the app's, the display hardware can rotate a compressed buffer but not a linear
+ * one, so with a linear swapchain SurfaceFlinger falls back to drawing every frame on the GPU
+ * (client composition). The value is the raw usage bit(s) so they can be swept without a
+ * rebuild: Qualcomm gralloc takes GRALLOC_USAGE_PRIVATE_0 (0x10000000) for UBWC. 0 = off, the
+ * behaviour every build before this one had. Read once; a change needs a process restart. */
+#define TU_SWAPCHAIN_UBWC_DEFAULT 0
+
+static uint64_t
+swapchain_extra_usage(void)
+{
+   static uint64_t usage = UINT64_MAX;
+
+   if (usage == UINT64_MAX) {
+      const char *value = os_get_option("tu_swapchain_ubwc");
+      usage = value ? strtoull(value, NULL, 0) : TU_SWAPCHAIN_UBWC_DEFAULT;
+      if (usage != 0)
+         mesa_logi("swapchain: adding gralloc usage 0x%" PRIx64 " (tu_swapchain_ubwc)", usage);
+   }
+
+   return usage;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 vk_common_GetSwapchainGrallocUsageANDROID(VkDevice device, VkFormat format,
                                           VkImageUsageFlags imageUsage,
                                           int *grallocUsage)
 {
-   return setup_gralloc0_usage(format, imageUsage, grallocUsage);
+   VkResult result = setup_gralloc0_usage(format, imageUsage, grallocUsage);
+   if (result != VK_SUCCESS)
+      return result;
+
+   *grallocUsage |= (int) swapchain_extra_usage();
+
+   return VK_SUCCESS;
 }
 
 
@@ -658,6 +693,8 @@ vk_common_GetSwapchainGrallocUsage2ANDROID(
       *grallocProducerUsage |= GRALLOC1_PRODUCER_USAGE_GPU_RENDER_TARGET;
    if (gralloc_usage & GRALLOC_USAGE_HW_TEXTURE)
       *grallocConsumerUsage |= GRALLOC1_CONSUMER_USAGE_GPU_TEXTURE;
+
+   *grallocProducerUsage |= swapchain_extra_usage();
 
    /* for front buffer rendering */
    if (swapchainImageUsage & VK_SWAPCHAIN_IMAGE_USAGE_SHARED_BIT_ANDROID)
