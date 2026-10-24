@@ -82,8 +82,8 @@ PREFER_SYSMEM on the Adreno 610`).** On a Snapdragon 662 a PS2 replay took
 `TU_AUTOTUNE_ALGO` and the drirc option still override it.
 
 **Adreno 722 (Snapdragon 7 Gen 4 / Dragonwing Q-7790, Retroid Pocket Duo).**
-Five commits (the stock-driver changes below came later). Upstream's A722 table entry is Qualcomm's
-placeholder. Ours copies the A720, because Qualcomm's KGSL source treats the two
+Five commits (three more, taken from Qualcomm's driver, are described after the
+register restore below). Upstream's A722 table entry is Qualcomm's placeholder. Ours copies the A720, because Qualcomm's KGSL source treats the two
 as one family (same SP counts, same clusters, same firmware), with two CCUs and
 32-row tile alignment. The follow-up writes `RB_RBP_CNTL` and `RB_DBG_ECO_CNTL`
 as 0 on the A722: upstream's magic-register cleanup stopped writing them on the
@@ -168,16 +168,20 @@ what the `tu_override_uncached_as_cache_coherent` drirc option does elsewhere. T
 gain comes from the application's memory (render targets, textures, buffers), not
 from the driver's own buffers. Measured on the Duo with the three together against
 `axfl2-005`, on 17 ARMSX2 GS dumps at 2x (GPU-inclusive time per drawn frame, three
-interleaved repetitions): mean -8.6%, median -6.5%, God of War II -26% and -22%,
-Black -17%, Metal Gear Solid 3 -13%, Shadow of the Colossus -7 to -10%, no dump slower
-by more than 1.1% (Ratchet & Clank: Up Your Arsenal, within its noise). Final frames
-were pixel-identical on all 17 dumps, default and forced GMEM, and identical to
+interleaved repetitions): mean -8.6%, median -6.5%, God of War II -26.1% and -22.4%,
+Black -17.0%, Metal Gear Solid 3 -12.5%, Shadow of the Colossus -6.5 to -10.4%, no dump
+slower by more than 1.1% (Ratchet & Clank: Up Your Arsenal, within its noise). Final
+frames were pixel-identical on all 17 dumps, default and forced GMEM, and identical to
 sysmem under a second, high-priority GPU client (0 of 640 frames wrong; the unfixed
 pack `axfl2-004` failed in the same session). Registers that Qualcomm's bin preamble
 restores and Turnip's does not (point size, dither, flat-shading mode, stereo
 rendering, private-memory bases) were checked on the GPU: the draw-state registers
 are back before every draw that renders, the others do not affect what ARMSX2 draws,
-so no restore was added. The record is in the ARMSX2 umbrella,
+so no restore was added. The replays do not draw the app's own UI or present
+through SurfaceFlinger, which is where a memory-type change could still show something,
+so the build was then played in ARMSX2 on a Duo: it ran well, with no rendering
+problems reported. Only the Adreno 722 is affected by these three changes; every other
+GPU behaves as in `axfl2-005`. The record is in the ARMSX2 umbrella,
 `devs/bmdhacks/campaigns/duo-driver-next-2026-10-23/stock-diff/`.
 
 **Wayland build switch (`wsi/wayland: let a build opt out of wl_fixes …`).** Lets
