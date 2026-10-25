@@ -1846,6 +1846,22 @@ tu_autotune::tu_autotune(struct tu_device *device, VkResult &result)
       mesa_logi("autotune: %s, replay cost %" PRIu32 " per draw and bin, %" PRIu32 " per bin",
                 active_config.load().to_string().c_str(), replay_cost.per_draw_bin, replay_cost.per_bin);
 
+   const char *log_path = os_get_option("TU_AUTOTUNE_LOG");
+   if (log_path && *log_path) {
+      decision_log = fopen(log_path, "a");
+      if (decision_log) {
+         decision_log_start_ns = os_time_get_nano();
+         const char *name = fd_dev_name(&device->physical_device->dev_id);
+         fprintf(decision_log,
+                 "# tu autotune decision log: gpu=%s chip_id=0x%" PRIx64 " %s replay_k=%" PRIu32 " replay_bin=%" PRIu32
+                 "\n",
+                 name ? name : "?", device->physical_device->dev_id.chip_id,
+                 active_config.load().to_string().c_str(), replay_cost.per_draw_bin, replay_cost.per_bin);
+      } else {
+         mesa_logw("autotune: cannot open TU_AUTOTUNE_LOG=%s", log_path);
+      }
+   }
+
    if (supports_preempt_latency_tracking()) {
       const char *fail_reason = nullptr;
 
@@ -1894,12 +1910,17 @@ tu_autotune::~tu_autotune()
    active_batches.clear();
    tu_bo_suballocator_finish(&suballoc);
 
+   if (decision_log)
+      fclose(decision_log);
+
    fd_perfcntr_release(device->perfcntrs, preemption_latency_counter);
    fd_perfcntr_release(device->perfcntrs, always_count_counter);
 }
 
 tu_autotune::cmd_buf_ctx::cmd_buf_ctx(struct tu_autotune &autotune): batch(autotune.create_batch())
 {
+   if (autotune.decision_log)
+      serial = autotune.next_cb_serial.fetch_add(1, std::memory_order_relaxed);
 }
 
 tu_autotune::cmd_buf_ctx::~cmd_buf_ctx()
@@ -1927,6 +1948,10 @@ tu_autotune::cmd_buf_ctx::reset(struct tu_autotune &autotune)
 {
    batch = autotune.create_batch();
    clear_rp_instances();
+   if (autotune.decision_log) {
+      serial = autotune.next_cb_serial.fetch_add(1, std::memory_order_relaxed);
+      rp_index = 0;
+   }
 }
 
 void
@@ -2231,6 +2256,50 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
    }
 
    return reason ? forced(reason, mode) : mode;
+}
+
+void
+tu_autotune::log_decision(struct tu_cmd_buffer *cmd_buffer, bool sysmem)
+{
+   if (!decision_log)
+      return;
+
+   const struct tu_cmd_state *cmd_state = &cmd_buffer->state;
+   const struct tu_render_pass *pass = cmd_state->pass;
+   const struct tu_framebuffer *framebuffer = cmd_state->framebuffer;
+   const struct tu_render_pass_state *rp_state = &cmd_state->rp;
+   cmd_buf_ctx &cb_ctx = cmd_buffer->autotune_ctx;
+   const VkExtent2D &area = cmd_state->render_areas[0].extent;
+   const VkExtent2D &tiles = cmd_state->tiling->vsc.tile_count;
+
+   /* The estimate fields are '-' when the BANDWIDTH estimate was not computed for this pass (mode forced, or another
+    * algorithm). sysmem_bw and gmem_bw are the two sides without replay_bw; GMEM won when sysmem_bw > gmem_bw +
+    * replay_bw. The pass's bytes per pixel and area let a forced pass's attachment traffic be computed offline.
+    */
+   const cmd_buf_ctx::bandwidth_estimate &e = cb_ctx.estimate;
+   char est[160];
+   if (e.valid) {
+      snprintf(est, sizeof(est),
+               "hash=%016" PRIx64 " samples=%" PRIu64 " sysmem_bw=%" PRIu64 " gmem_bw=%" PRIu64 " replay_bw=%" PRIu64
+               " measured=%d flip=%d",
+               e.hash, e.mean_samples, e.sysmem_bandwidth, e.gmem_bandwidth, e.replay_bandwidth, e.measure,
+               e.replay_flipped);
+   } else {
+      snprintf(est, sizeof(est), "hash=- samples=- sysmem_bw=- gmem_bw=- replay_bw=- measured=- flip=-");
+   }
+
+   fprintf(decision_log,
+           "cb=%" PRIu32 " rp=%" PRIu32 " t_ms=%.3f draws=%" PRIu32 " bins=%" PRIu32 "x%" PRIu32 " area=%" PRIu32
+           "x%" PRIu32 " fb=%" PRIu32 "x%" PRIu32 "x%" PRIu32 " sys_bpp=%" PRIu32 " gmem_bpp=%" PRIu32 " %s mode=%s"
+           " reason=%s\n",
+           cb_ctx.serial, cb_ctx.rp_index, (os_time_get_nano() - decision_log_start_ns) / 1e6,
+           rp_state->drawcall_count, tiles.width, tiles.height, area.width, area.height, framebuffer->width,
+           framebuffer->height, framebuffer->layers, pass->sysmem_bandwidth_per_pixel, pass->gmem_bandwidth_per_pixel,
+           est, sysmem ? "SYSMEM" : "GMEM",
+           rp_state->force_render_mode_reason ? rp_state->force_render_mode_reason : "-");
+
+   cb_ctx.rp_index++;
+   cb_ctx.estimate.valid = false;
 }
 
 uint32_t

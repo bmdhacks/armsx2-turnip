@@ -7,6 +7,7 @@
 #define TU_AUTOTUNE_H
 
 #include <atomic>
+#include <cstdio>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -250,6 +251,14 @@ struct tu_autotune {
    } replay_cost;
    replay_cost_t get_replay_cost() const;
 
+   /* ARMSX2: TU_AUTOTUNE_LOG=<file> appends one line per render pass: who chose the mode and why, the pass's draws,
+    * bins and area, and the BANDWIDTH estimate's terms, so that a replay cost can be scored offline against per-pass
+    * timings. Null when the option is unset.
+    */
+   FILE *decision_log = nullptr;
+   uint64_t decision_log_start_ns = 0;
+   std::atomic<uint32_t> next_cb_serial = 0;
+
    /* Note: This will internally lock rp_mutex internally, no need to lock it. */
    rp_history_handle find_rp_history(const rp_key &key);
    void reap_old_rp_histories(uint64_t now);
@@ -305,7 +314,9 @@ struct tu_autotune {
     */
    struct cmd_buf_ctx {
     public:
-      /* ARMSX2: the BANDWIDTH terms of the pass being decided, written by get_optimal_mode() for TU_AUTOTUNE_STATS. */
+      /* ARMSX2: the BANDWIDTH terms of the pass being decided, written by get_optimal_mode() for TU_AUTOTUNE_STATS
+       * and read by log_decision() for the same pass.
+       */
       struct bandwidth_estimate {
          bool valid;
          bool measure;
@@ -337,6 +348,8 @@ struct tu_autotune {
       void clear_rp_instances();
 
       bandwidth_estimate estimate = {};
+      uint32_t serial = 0;   /* ARMSX2: TU_AUTOTUNE_LOG's command buffer number, new on every reset. */
+      uint32_t rp_index = 0; /* ARMSX2: render passes logged since the reset. */
 
       /* Creates a new RP entry attached to this CB. */
       rp_entry *
@@ -373,6 +386,9 @@ struct tu_autotune {
 
    /* Note: For preemption latency tracking to work, key_opt from emit_preempt_latency_tracking_rp_hash() must be used. */
    render_mode get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx, rp_key_opt key_opt);
+
+   /* ARMSX2: TU_AUTOTUNE_LOG. Called once per render pass once its mode is final, whatever decided it. */
+   void log_decision(struct tu_cmd_buffer *cmd_buffer, bool sysmem);
 
    /* Returns the optimal tile size divisor for the given CB state. */
    uint32_t get_tile_size_divisor(struct tu_cmd_buffer *cmd_buffer);
