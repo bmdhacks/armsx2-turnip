@@ -2591,8 +2591,14 @@ surface_dmabuf_feedback_done(void *data,
                                             u_vector_tail(&f->modifiers),
                                             chain->num_drm_modifiers,
                                             chain->drm_modifiers)) {
+      /* A rotated chain, whether the WSI or the app rotates, stays as long
+       * as its modifier is still offered: the feedback changes when the
+       * compositor starts or stops scanning the buffer out, and reallocating
+       * for it would make it change again.
+       */
       bool modifier_offered = false;
-      if (chain->prerotate && chain->base.image_count > 0) {
+      if ((chain->prerotate || chain->buffer_transform != WL_OUTPUT_TRANSFORM_NORMAL) &&
+          chain->base.image_count > 0) {
          const uint64_t current_modifier = chain->images[0].base.drm_modifier;
          const uint64_t *offered = u_vector_tail(&f->modifiers);
          for (uint32_t i = 0; i < u_vector_length(&f->modifiers) && !modifier_offered; i++)
