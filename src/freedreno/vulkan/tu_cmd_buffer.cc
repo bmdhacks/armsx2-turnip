@@ -4266,7 +4266,10 @@ tu_cmd_render(struct tu_cmd_buffer *cmd_buffer,
    tu_autotune::rp_key_opt rp_key = cmd_buffer->device->autotune->emit_preempt_latency_tracking_rp_hash(cmd_buffer);
 
    tu_autotune::rp_ctx_t rp_ctx = NULL;
-   if (use_sysmem_rendering(cmd_buffer, &rp_ctx, rp_key))
+   bool sysmem = use_sysmem_rendering(cmd_buffer, &rp_ctx, rp_key);
+   /* ARMSX2: TU_AUTOTUNE_LOG, one line per render pass. */
+   cmd_buffer->device->autotune->log_decision(cmd_buffer, sysmem);
+   if (sysmem)
       tu_cmd_render_sysmem<CHIP>(cmd_buffer, rp_ctx);
    else
       tu_cmd_render_tiles<CHIP>(cmd_buffer, rp_ctx, fdm_offsets);
