@@ -174,8 +174,15 @@ fallback_gralloc_get_buffer_info(struct u_gralloc *gralloc,
                    hnd->handle->numInts > 3 ? (unsigned)ints[3] : 0);
       }
 
-      /* This UBWC flag was introduced in a5xx. */
+      /* This UBWC flag was introduced in a5xx. A handle with the magic keeps the flags word in
+       * ints[1]. Handles without it (Android 15/16 gralloc: measured on the Retroid Pocket Duo,
+       * Android 16 / Adreno 722) carry a status int first and the flags word third: the same
+       * swapchain buffer reads 00000000 00000001 00000200 linear and 00000000 00000001 0a000000
+       * with compression, i.e. PRIV_FLAGS_UBWC_ALIGNED | PRIV_FLAGS_TILE_RENDERED in ints[2].
+       * Missing that bit imports a compressed buffer as linear, and the picture is garbage. */
       bool ubwc = ints[1] & 0x08000000;
+      if (ints[0] != gmsm && hnd->handle->numInts > 2)
+         ubwc |= ints[2] & 0x08000000;
       out->modifier = ubwc ? DRM_FORMAT_MOD_QCOM_COMPRESSED : DRM_FORMAT_MOD_LINEAR;
    }
 #endif
