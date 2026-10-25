@@ -130,21 +130,38 @@ on God of War II. The design and the test plan are in the ARMSX2 umbrella,
 `devs/bmdhacks/campaigns/duo-gmem-2026-10-22/autotune-cpu-design.md`.
 
 **Draw replay cost in the autotuner (`tu/autotune: add a per-GPU draw replay cost
-…`, `… log every render-pass decision …`, `… add a per-draw constant …`).** Tiled
-(GMEM) rendering walks a pass's whole draw stream in the binning pass and again for
-every bin; direct (sysmem) rendering walks it once. The BANDWIDTH estimate compared
-bytes only, so a pass of about 1,000 small draws over 10 bins looked like a small
-GMEM win and was a large loss: on a Retroid Pocket Duo (Adreno 722) NASCAR's
-1,032-draw pass took 3.73 ms tiled against 2.03 ms direct, and Shadow of the
-Colossus's 3.39 against 2.38. The GMEM side now carries
-`draws * (per_draw + per_draw_bin * bins) + per_bin * bins`, in the estimate's
-bytes, from a per-GPU table. Only the A722 has an entry (1,800 per draw and bin,
-provisional); every other GPU gets 0 and decides exactly as before.
-`TU_AUTOTUNE_REPLAY_DRAW`, `TU_AUTOTUNE_REPLAY_K` and `TU_AUTOTUNE_REPLAY_BIN`
-override the table. On the Duo with the provisional value those two passes go
-direct (NASCAR's frame -1.7 ms of GPU time when its feedback-loop pass is split,
-Shadow of the Colossus -1.06 ms on the emulator's normal road), while God of War
-II's tiled 28- and 91-draw passes and every small tiled pass stay tiled.
+…`, `… log every render-pass decision …`, `… add a per-draw constant …`, `… charge
+the replay cost only for bins after the first`, `… replay cost constants for the
+Adreno 650 and 740, and a default for other GPUs`).** Tiled (GMEM) rendering walks
+a pass's whole draw stream in the binning pass and again for every bin; direct
+(sysmem) rendering walks it once. The BANDWIDTH estimate compared bytes only, so a
+pass of about 1,000 small draws over 10 bins looked like a small GMEM win and was a
+large loss: on a Retroid Pocket Duo (Adreno 722) NASCAR's 1,032-draw pass took
+3.73 ms tiled against 2.03 ms direct, and Shadow of the Colossus's 3.39 against
+2.38. The GMEM side now carries
+`draws * (per_draw + per_draw_bin * replayed_bins) + per_bin * replayed_bins`, in
+the estimate's bytes. `replayed_bins` is the bin count minus the first bin: the
+first is the one direct rendering would draw anyway, so a pass drawn as one bin
+replays nothing and is charged nothing. Offline this removed every wrong-way flip
+of a one-bin pass on the four GPUs measured (4 on the 610, 12 on the 722, 4 on the
+650, 20 on the 740). The constants come from a table keyed on the GPU's name, per
+draw and bin: 1,800 on the Adreno 722 (FD722, the Duo), 17,000 on the Adreno 650
+(FD650, the Retroid Flip 2) and 72,000 on the Adreno 740 (FD740, the Retroid Pocket
+Nova). The 650 and 740 values are the geometric middle of the range of constants
+whose summed estimate error is within a small margin of its minimum; the 722 value
+came from the first smoke test and was kept after the 20-dump run. All three were
+checked on 20 GS dumps at 2x: frame time against no term 0.980 on the Duo, 0.953
+on the Flip 2 (FlatOut 2 0.532, Shadow of the Colossus 0.874) and 0.949 on the Nova
+(Splashdown 0.689). They were measured with the term charging every bin; charging
+bins after the first was scored offline only. Any GPU with no row gets 6,000, a value no device was
+measured for: scored across the four measured GPUs it is the one default that
+takes the Flip 2's gains and slows no title near its frame budget on the slow
+GPUs. The Adreno 610 has no row because it is forced to PREFER_SYSMEM, so the
+chooser never runs there. `TU_AUTOTUNE_REPLAY_DRAW`, `TU_AUTOTUNE_REPLAY_K` and
+`TU_AUTOTUNE_REPLAY_BIN` override the table and the default. On the Duo those two
+passes go direct (NASCAR's frame -1.7 ms of GPU time when its feedback-loop pass is
+split, Shadow of the Colossus -1.06 ms on the emulator's normal road), while God of
+War II's tiled 28- and 91-draw passes and every small tiled pass stay tiled.
 `TU_AUTOTUNE_LOG=<file>` writes one line per render pass with the mode, the reason
 if it was forced, and the estimate's terms, so the constants can be scored against
 per-pass timings. Record and per-GPU calibration runbook: ARMSX2 umbrella,

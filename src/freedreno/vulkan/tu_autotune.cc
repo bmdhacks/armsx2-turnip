@@ -369,14 +369,44 @@ tu_autotune::get_env_config()
    return at_config;
 }
 
-/* ARMSX2: the replay cost of each GPU, in the BANDWIDTH algorithm's byte units (see bandwidth_algo). A GPU that is not
- * listed gets 0, which is upstream's estimate.
+/* ARMSX2: the replay cost of each GPU, in the BANDWIDTH algorithm's byte units (see bandwidth_algo). per_draw_bin is
+ * the cost per draw of each bin after the first. A GPU with no row gets replay_cost_default. TU_AUTOTUNE_REPLAY_DRAW,
+ * TU_AUTOTUNE_REPLAY_K and TU_AUTOTUNE_REPLAY_BIN override the row and the default.
  *
- * Adreno 722: provisional. On a Retroid Pocket Duo two passes of about 1,030 small draws over 10 bins (NASCAR, Shadow
- * of the Colossus) were tiled and took 3.73 and 3.39 ms where sysmem took 2.03 and 2.44 ms, while passes of 28-100
- * larger draws over 8 bins gained up to 0.56 ms from tiling. 0.15 us per draw and bin at about 12 GB/s is 1.8 KB; it
- * sends the 10,320 draw-bin passes to sysmem and leaves the 224-800 draw-bin winners in GMEM. Record: ARMSX2 umbrella
- * devs/bmdhacks/campaigns/duo-driver-next-2026-10-23/replay-cost/.
+ * The three rows were measured with the term charging every bin. Charging bins after the first was scored offline on
+ * the same logs and has not been run on a device.
+ *
+ * Adreno 722 (FD722), Retroid Pocket Duo: 1,800 comes from the first smoke test. Two passes of about 1,030 small draws
+ * over 10 bins (NASCAR, Shadow of the Colossus) were tiled and took 3.73 and 3.39 ms where sysmem took 2.03 and 2.44
+ * ms, while passes of 28-100 larger draws over 8 bins gained up to 0.56 ms from tiling. 0.15 us per draw and bin at
+ * about 12 GB/s is 1.8 KB; it sends the 10,320 draw-bin passes to sysmem and leaves the 224-800 draw-bin winners in
+ * GMEM. Over 20 dumps at 2x the frame time is 0.980 of the time without the term (geometric mean). 6,800 scores better
+ * offline but times the same as 1,800 (1.005), so 1,800 stays.
+ *
+ * Adreno 650 (FD650), Retroid Flip 2 (Snapdragon 865, ROCKNIX): 17,000 is the geometric middle of the range 9,100 to
+ * 32,300 where the summed regret stays within 0.15 ms per frame of its minimum on 19 dumps (33.9 ms per frame at 0,
+ * 1.46 at 17,000). Over 20 dumps at 2x the frame time is 0.953 of the time without the term (FlatOut 2 0.532, Shadow of
+ * the Colossus 101255 0.874, SM3 0.915, OutRun 0.924). The frames match to within the device's run-to-run noise, about
+ * one pixel per frame: it does not draw the same frame twice with any pack.
+ *
+ * Adreno 740 (FD740), Retroid Pocket Nova (Snapdragon 8 Gen 2, KGSL chip id 0x43050a01): 72,000 is the geometric middle
+ * of the range 27,400 to 190,900 where the summed regret stays within 0.25 ms per frame of its minimum on 19 dumps
+ * (16.5 ms per frame at 0, 0.52 at 72,000). Over 20 dumps at 2x the frame time is 0.949 of the time without the term
+ * (Splashdown 0.689, FlatOut 2 0.809, OutRun 0.828, Shadow of the Colossus 101255 0.867) and the frames are identical.
+ * 20 of the 63 passes it flipped went to the slower mode; all were one-bin passes, which is why the term charges bins
+ * after the first. FD740v3 (Quest 3) and FD750 are other names and get the default.
+ *
+ * Default, 6,000: no device was measured for it. Scored from the recorded runs and the offline model across the four
+ * measured GPUs, it is the one default that takes the Flip 2's gains (FlatOut 2, SM3) and slows no title within 15% of
+ * its frame budget on the 610, 722 or 650 by more than the run-to-run noise. It is low for fast parts: the 740 prefers
+ * 72,000, and 6,000 keeps about two thirds of its regret gain.
+ *
+ * Adreno 610: no row. get_env_config() forces PREFER_SYSMEM on it, which takes the early return in the chooser before
+ * the bandwidth estimate is computed, so the term never applies there. With TU_AUTOTUNE_ALGO=bandwidth it gets the
+ * default, which timed 0.990 of the forced-sysmem time on 20 dumps on a Snapdragon 662.
+ *
+ * Record: ARMSX2 umbrella devs/bmdhacks/campaigns/duo-driver-next-2026-10-23/replay-cost/ (sections "Duo", "Flip 2",
+ * "Nova", and "Constant choice, budget-weighted" for the rows and the default).
  */
 struct replay_cost_entry {
    const char *name; /* fd_dev_name() */
@@ -387,20 +417,28 @@ struct replay_cost_entry {
 
 static constexpr replay_cost_entry replay_cost_table[] = {
    { "FD722", 0, 1800, 0 },
+   { "FD650", 0, 17000, 0 },
+   { "FD740", 0, 72000, 0 },
 };
+
+static constexpr replay_cost_entry replay_cost_default = { nullptr, 0, 6000, 0 };
 
 tu_autotune::replay_cost_t
 tu_autotune::get_replay_cost() const
 {
-   replay_cost_t cost;
    const char *name = fd_dev_name(&device->physical_device->dev_id);
-   for (const replay_cost_entry &entry : replay_cost_table) {
-      if (name && !strcmp(name, entry.name)) {
-         cost.per_draw = entry.per_draw;
-         cost.per_draw_bin = entry.per_draw_bin;
-         cost.per_bin = entry.per_bin;
+   const replay_cost_entry *entry = &replay_cost_default;
+   for (const replay_cost_entry &row : replay_cost_table) {
+      if (name && !strcmp(name, row.name)) {
+         entry = &row;
+         break;
       }
    }
+
+   replay_cost_t cost;
+   cost.per_draw = entry->per_draw;
+   cost.per_draw_bin = entry->per_draw_bin;
+   cost.per_bin = entry->per_bin;
 
    /* Calibration and A/B. On Android these are debug.mesa.tu.autotune.replay.draw, debug.mesa.tu.autotune.replay.k and
     * debug.mesa.tu.autotune.replay.bin.
@@ -1166,8 +1204,8 @@ struct tu_autotune::rp_history {
           * SYSMEM walks it once. Draws outside a bin are skipped, but the command processor still reads their packets.
           * That time grows with draws (the binning walk) and with draws times bins (the skips), not with any byte
           * count above: a pass of 1,000 small draws over 10 bins can save a few MB and still lose 1.7 ms. It is
-          * converted into bytes with per-GPU constants (get_replay_cost()); they are 0 on a GPU without measured
-          * values, which keeps the upstream estimate.
+          * converted into bytes with per-GPU constants (get_replay_cost()): a table row, or the default for a GPU
+          * with no row.
           *
           * The bin terms charge bins after the first. The first bin is the one SYSMEM would draw anyway, and a pass
           * drawn as a single bin replays nothing, so it is charged nothing. Charging every bin sent small one-bin
