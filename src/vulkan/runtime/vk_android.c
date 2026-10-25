@@ -470,7 +470,7 @@ setup_gralloc0_usage(VkFormat format, VkImageUsageFlags image_usage,
  * (client composition). The value is the raw usage bit(s) so they can be swept without a
  * rebuild: Qualcomm gralloc takes GRALLOC_USAGE_PRIVATE_0 (0x10000000) for UBWC. 0 = off, the
  * behaviour every build before this one had. Read once; a change needs a process restart. */
-#define TU_SWAPCHAIN_UBWC_DEFAULT 0
+#define TU_SWAPCHAIN_UBWC_DEFAULT 0x10000000ull
 
 static uint64_t
 swapchain_extra_usage(void)
