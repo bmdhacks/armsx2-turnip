@@ -129,6 +129,27 @@ are still measured each second on Jak II, Burnout 3 and Shadow of the Colossus, 
 on God of War II. The design and the test plan are in the ARMSX2 umbrella,
 `devs/bmdhacks/campaigns/duo-gmem-2026-10-22/autotune-cpu-design.md`.
 
+**Draw replay cost in the autotuner (`tu/autotune: add a per-GPU draw replay cost
+…`, `… log every render-pass decision …`, `… add a per-draw constant …`).** Tiled
+(GMEM) rendering walks a pass's whole draw stream in the binning pass and again for
+every bin; direct (sysmem) rendering walks it once. The BANDWIDTH estimate compared
+bytes only, so a pass of about 1,000 small draws over 10 bins looked like a small
+GMEM win and was a large loss: on a Retroid Pocket Duo (Adreno 722) NASCAR's
+1,032-draw pass took 3.73 ms tiled against 2.03 ms direct, and Shadow of the
+Colossus's 3.39 against 2.38. The GMEM side now carries
+`draws * (per_draw + per_draw_bin * bins) + per_bin * bins`, in the estimate's
+bytes, from a per-GPU table. Only the A722 has an entry (1,800 per draw and bin,
+provisional); every other GPU gets 0 and decides exactly as before.
+`TU_AUTOTUNE_REPLAY_DRAW`, `TU_AUTOTUNE_REPLAY_K` and `TU_AUTOTUNE_REPLAY_BIN`
+override the table. On the Duo with the provisional value those two passes go
+direct (NASCAR's frame -1.7 ms of GPU time when its feedback-loop pass is split,
+Shadow of the Colossus -1.06 ms on the emulator's normal road), while God of War
+II's tiled 28- and 91-draw passes and every small tiled pass stay tiled.
+`TU_AUTOTUNE_LOG=<file>` writes one line per render pass with the mode, the reason
+if it was forced, and the estimate's terms, so the constants can be scored against
+per-pass timings. Record and per-GPU calibration runbook: ARMSX2 umbrella,
+`devs/bmdhacks/campaigns/duo-driver-next-2026-10-23/replay-cost/`.
+
 **Register restore after a context switch on Adreno 7xx (`tu: restore the a7xx
 RB clear/buffer/CCU registers when switching back into a command buffer`).** On
 an Adreno 722 the GPU switches to a higher priority context, such as Android's
