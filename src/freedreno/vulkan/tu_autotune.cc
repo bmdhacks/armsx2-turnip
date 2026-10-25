@@ -369,6 +369,48 @@ tu_autotune::get_env_config()
    return at_config;
 }
 
+/* ARMSX2: the replay cost of each GPU, in the BANDWIDTH algorithm's byte units (see bandwidth_algo). A GPU that is not
+ * listed gets 0, which is upstream's estimate.
+ *
+ * Adreno 722: provisional. On a Retroid Pocket Duo two passes of about 1,030 small draws over 10 bins (NASCAR, Shadow
+ * of the Colossus) were tiled and took 3.73 and 3.39 ms where sysmem took 2.03 and 2.44 ms, while passes of 28-100
+ * larger draws over 8 bins gained up to 0.56 ms from tiling. 0.15 us per draw and bin at about 12 GB/s is 1.8 KB; it
+ * sends the 10,320 draw-bin passes to sysmem and leaves the 224-800 draw-bin winners in GMEM. Record: ARMSX2 umbrella
+ * devs/bmdhacks/campaigns/duo-driver-next-2026-10-23/replay-cost/.
+ */
+struct replay_cost_entry {
+   const char *name; /* fd_dev_name() */
+   uint32_t per_draw_bin;
+   uint32_t per_bin;
+};
+
+static constexpr replay_cost_entry replay_cost_table[] = {
+   { "FD722", 1800, 0 },
+};
+
+tu_autotune::replay_cost_t
+tu_autotune::get_replay_cost() const
+{
+   replay_cost_t cost;
+   const char *name = fd_dev_name(&device->physical_device->dev_id);
+   for (const replay_cost_entry &entry : replay_cost_table) {
+      if (name && !strcmp(name, entry.name)) {
+         cost.per_draw_bin = entry.per_draw_bin;
+         cost.per_bin = entry.per_bin;
+      }
+   }
+
+   /* Calibration and A/B. On Android these are debug.mesa.tu.autotune.replay.k and debug.mesa.tu.autotune.replay.bin. */
+   cost.per_draw_bin = CLAMP(debug_get_num_option("TU_AUTOTUNE_REPLAY_K", cost.per_draw_bin), 0, UINT32_MAX);
+   cost.per_bin = CLAMP(debug_get_num_option("TU_AUTOTUNE_REPLAY_BIN", cost.per_bin), 0, UINT32_MAX);
+
+   if (TU_DEBUG(STARTUP))
+      mesa_logi("TU_AUTOTUNE: %s replay cost %" PRIu32 " per draw and bin, %" PRIu32 " per bin", name ? name : "?",
+                cost.per_draw_bin, cost.per_bin);
+
+   return cost;
+}
+
 uint32_t
 tu_autotune::get_supported_mod_flags(tu_device *device) const
 {
@@ -1081,8 +1123,10 @@ struct tu_autotune::rp_history {
                                    const struct tu_render_pass *pass,
                                    const struct tu_framebuffer *framebuffer,
                                    const struct tu_render_pass_state *rp_state,
+                                   replay_cost_t replay,
                                    bool settle,
-                                   bool *measure)
+                                   bool *measure,
+                                   cmd_buf_ctx::bandwidth_estimate *estimate)
       {
          uint32_t pass_pixel_count = 0;
          if (cmd_state->per_layer_render_area) {
@@ -1113,6 +1157,17 @@ struct tu_autotune::rp_history {
             return (samples * rp_state->drawcall_bandwidth_per_sample_sum) / rp_state->drawcall_count;
          };
 
+         /* ARMSX2: GMEM walks the whole draw stream once in the binning pass and once more for every bin, where
+          * SYSMEM walks it once. Draws outside a bin are skipped, but the command processor still reads their packets,
+          * and that time scales with draws times bins, not with any byte count above. A pass of 1,000 small draws
+          * over 10 bins can save a few MB and still lose 1.7 ms. The cost is converted into bytes with a per-GPU
+          * constant (get_replay_cost()); it is 0 on a GPU without a measured value, which keeps the upstream estimate.
+          */
+         const VkExtent2D &tiles = cmd_state->tiling->vsc.tile_count;
+         const uint64_t bins = static_cast<uint64_t>(tiles.width) * tiles.height;
+         const uint64_t replay_bandwidth =
+            bins * (static_cast<uint64_t>(replay.per_draw_bin) * rp_state->drawcall_count + replay.per_bin);
+
          /* Drawcalls access the memory in SYSMEM rendering (ignoring CCU).
           *
           * Drawcalls access GMEM in GMEM rendering, but we do not want to ignore them completely.  The state changes
@@ -1120,15 +1175,29 @@ struct tu_autotune::rp_history {
           *
           * The result only moves from SYSMEM to GMEM as samples grows.
           */
-         auto mode_for = [&](uint64_t samples) {
+         auto mode_with = [&](uint64_t samples, uint64_t replay_bw) {
             uint64_t draw_bandwidth = draw_call_bandwidth(samples);
             uint64_t sysmem_bandwidth = sysmem_attachment_bandwidth + draw_bandwidth;
-            uint64_t gmem_bandwidth = (gmem_attachment_bandwidth * 11 + draw_bandwidth) / 10;
+            uint64_t gmem_bandwidth = (gmem_attachment_bandwidth * 11 + draw_bandwidth) / 10 + replay_bw;
             return sysmem_bandwidth <= gmem_bandwidth ? render_mode::SYSMEM : render_mode::GMEM;
          };
+         auto mode_for = [&](uint64_t samples) { return mode_with(samples, replay_bandwidth); };
 
          uint64_t mean_samples = mean_samples_passed.get();
          render_mode mode = mode_for(mean_samples);
+
+         uint64_t mean_draw_bandwidth = draw_call_bandwidth(mean_samples);
+         *estimate = {
+            .valid = true,
+            .measure = true, /* The caller settles this. */
+            .replay_flipped = replay_bandwidth && mode == render_mode::SYSMEM &&
+                              mode_with(mean_samples, 0) == render_mode::GMEM,
+            .hash = history.hash,
+            .mean_samples = mean_samples,
+            .sysmem_bandwidth = sysmem_attachment_bandwidth + mean_draw_bandwidth,
+            .gmem_bandwidth = (gmem_attachment_bandwidth * 11 + mean_draw_bandwidth) / 10,
+            .replay_bandwidth = replay_bandwidth,
+         };
 
          *measure = true;
          if (settle && results.load(std::memory_order_relaxed) >= SETTLE_MIN_RESULTS) {
@@ -1753,10 +1822,11 @@ tu_autotune::log_stats(uint64_t now)
    }
 
    mesa_logi("autotune stats: %.2f s, %" PRIu32 " submits, %" PRIu32 " passes, %" PRIu32 " tuned, %" PRIu32
-             " measured, %" PRIu32 " gmem, %" PRIu32 " new histories, %zu histories",
+             " measured, %" PRIu32 " gmem, %" PRIu32 " sysmem by replay cost, %" PRIu32 " new histories, %zu histories",
              (now - stats.last_log_ns) / 1e9, stats.submits, stats.passes.exchange(0, std::memory_order_relaxed),
              stats.tuned.exchange(0, std::memory_order_relaxed), stats.measured.exchange(0, std::memory_order_relaxed),
              stats.gmem.exchange(0, std::memory_order_relaxed),
+             stats.replay_sysmem.exchange(0, std::memory_order_relaxed),
              stats.new_histories.exchange(0, std::memory_order_relaxed), histories);
 
    stats.submits = 0;
@@ -1769,9 +1839,12 @@ tu_autotune::tu_autotune(struct tu_device *device, VkResult &result)
 {
    tu_bo_suballocator_init(&suballoc, device, 128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE, "autotune_suballoc");
 
+   replay_cost = get_replay_cost();
+
    stats_enabled = debug_get_bool_option("TU_AUTOTUNE_STATS", false);
    if (stats_enabled)
-      mesa_logi("autotune: %s", active_config.load().to_string().c_str());
+      mesa_logi("autotune: %s, replay cost %" PRIu32 " per draw and bin, %" PRIu32 " per bin",
+                active_config.load().to_string().c_str(), replay_cost.per_draw_bin, replay_cost.per_bin);
 
    if (supports_preempt_latency_tracking()) {
       const char *fail_reason = nullptr;
@@ -1959,6 +2032,7 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
 
    /* Just to ensure a segfault for accesses, in case we don't set it. */
    *rp_ctx = nullptr;
+   cb_ctx.estimate.valid = false;
 
    if (stats_enabled)
       stats.passes.fetch_add(1, std::memory_order_relaxed);
@@ -2131,13 +2205,15 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
    } else if (config.is_enabled(algorithm::BANDWIDTH)) {
       /* Preemption-latency tracking needs the per-RP timestamps of every instance, so it never settles. */
       bool settle = config.test(mod_flag::SETTLE) && !config.test(mod_flag::PREEMPT_OPTIMIZE);
-      mode = history.bandwidth.get_optimal_mode(history, cmd_state, pass, framebuffer, rp_state, settle, &measure);
+      mode = history.bandwidth.get_optimal_mode(history, cmd_state, pass, framebuffer, rp_state, replay_cost, settle,
+                                                &measure, &cb_ctx.estimate);
 
       /* A key seen for the first time may never come back (an image recreated every frame gets a new key every frame).
        * Its first decision rests on the attachment traffic alone either way, so learning starts at the second instance.
        */
       if (settle && created)
          measure = false;
+      cb_ctx.estimate.measure = measure;
    }
 
    /* An unmeasured pass gets no entry: no result buffer, no samples-passed events, nothing to process at submit. */
@@ -2150,6 +2226,8 @@ tu_autotune::get_optimal_mode(struct tu_cmd_buffer *cmd_buffer, rp_ctx_t *rp_ctx
          stats.measured.fetch_add(1, std::memory_order_relaxed);
       if (mode == render_mode::GMEM)
          stats.gmem.fetch_add(1, std::memory_order_relaxed);
+      if (cb_ctx.estimate.valid && cb_ctx.estimate.replay_flipped)
+         stats.replay_sysmem.fetch_add(1, std::memory_order_relaxed);
    }
 
    return reason ? forced(reason, mode) : mode;

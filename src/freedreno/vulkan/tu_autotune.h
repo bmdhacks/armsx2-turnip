@@ -232,12 +232,23 @@ struct tu_autotune {
       std::atomic<uint32_t> tuned = 0;
       std::atomic<uint32_t> measured = 0;
       std::atomic<uint32_t> gmem = 0;
+      std::atomic<uint32_t> replay_sysmem = 0; /* ARMSX2: SYSMEM only because of the replay cost. */
       std::atomic<uint32_t> new_histories = 0;
       uint32_t submits = 0;
       uint64_t last_log_ns = 0;
    } stats;
    bool stats_enabled = false;
    void log_stats(uint64_t now);
+
+   /* ARMSX2: the BANDWIDTH algorithm's cost, in its byte units, of GMEM walking the draw stream once more per bin:
+    * per_draw_bin * draws * bins + per_bin * bins is added to the GMEM side. Set per GPU in get_replay_cost(), 0
+    * (upstream's estimate) on any GPU without a measured value.
+    */
+   struct replay_cost_t {
+      uint32_t per_draw_bin = 0;
+      uint32_t per_bin = 0;
+   } replay_cost;
+   replay_cost_t get_replay_cost() const;
 
    /* Note: This will internally lock rp_mutex internally, no need to lock it. */
    rp_history_handle find_rp_history(const rp_key &key);
@@ -293,6 +304,19 @@ struct tu_autotune {
     *       done through tu_autotune.
     */
    struct cmd_buf_ctx {
+    public:
+      /* ARMSX2: the BANDWIDTH terms of the pass being decided, written by get_optimal_mode() for TU_AUTOTUNE_STATS. */
+      struct bandwidth_estimate {
+         bool valid;
+         bool measure;
+         bool replay_flipped; /* SYSMEM only because of the replay cost. */
+         uint64_t hash;
+         uint64_t mean_samples;
+         uint64_t sysmem_bandwidth;
+         uint64_t gmem_bandwidth; /* Without the replay cost. */
+         uint64_t replay_bandwidth;
+      };
+
     private:
       /* A batch of all entries from RPs within this CB. */
       std::shared_ptr<rp_entry_batch> batch;
@@ -311,6 +335,8 @@ struct tu_autotune {
 
       rp_instance_slot *find_rp_instance(uint64_t hash, bool insert);
       void clear_rp_instances();
+
+      bandwidth_estimate estimate = {};
 
       /* Creates a new RP entry attached to this CB. */
       rp_entry *
