@@ -1882,6 +1882,25 @@ wsi_wl_transform_from_vk(VkSurfaceTransformFlagBitsKHR transform)
    }
 }
 
+/* The Vulkan transform that rotates an unrotated buffer so an output with
+ * this wl_output transform (vk_wsi_wayland_prerotate, in degrees) shows it
+ * as it is.
+ */
+static VkSurfaceTransformFlagBitsKHR
+wsi_wl_prerotate_transform(uint32_t degrees)
+{
+   switch (degrees) {
+   case 90:
+      return VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
+   case 180:
+      return VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR;
+   case 270:
+      return VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR;
+   default:
+      return VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+   }
+}
+
 static VkResult
 wsi_wl_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
                                 struct wsi_device *wsi_device,
@@ -1925,7 +1944,16 @@ wsi_wl_surface_get_capabilities(VkIcdSurfaceBase *icd_surface,
          VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR |
          VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
    }
+   /* Wayland does not tell clients the output transform. With
+    * vk_wsi_wayland_prerotate_report set, report the vk_wsi_wayland_prerotate
+    * one, so an app that pre-rotates (preTransform = currentTransform) hands
+    * the compositor buffers it can show without rotating them, and the WSI's
+    * own rotated copy is skipped.
+    */
    caps->surfaceCapabilities.currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+   if (caps->surfaceCapabilities.supportedTransforms & VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR)
+      caps->surfaceCapabilities.currentTransform =
+         wsi_wl_prerotate_transform(wsi_device->wayland.report_degrees);
    caps->surfaceCapabilities.maxImageArrayLayers = 1;
 
    caps->surfaceCapabilities.supportedCompositeAlpha =
@@ -4050,21 +4078,8 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
        wl_proxy_get_version((struct wl_proxy *)wsi_wl_surface->base.surface) >=
           WL_SURFACE_SET_BUFFER_TRANSFORM_SINCE_VERSION) {
       /* rotate so the buffer transform matches the output transform */
-      VkSurfaceTransformFlagBitsKHR transform;
-      switch (wsi_device->wayland.prerotate_degrees) {
-      case 90:
-         transform = VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
-         break;
-      case 180:
-         transform = VK_SURFACE_TRANSFORM_ROTATE_180_BIT_KHR;
-         break;
-      case 270:
-         transform = VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR;
-         break;
-      default:
-         transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-         break;
-      }
+      const VkSurfaceTransformFlagBitsKHR transform =
+         wsi_wl_prerotate_transform(wsi_device->wayland.prerotate_degrees);
       if (transform != VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) {
          chain->prerotate = true;
          chain->buffer_transform = wsi_wl_transform_from_vk(transform);
