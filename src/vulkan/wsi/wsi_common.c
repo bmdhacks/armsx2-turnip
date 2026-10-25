@@ -320,6 +320,14 @@ wsi_device_init(struct wsi_device *wsi,
             driQueryOptioni(dri_options, "vk_wsi_wayland_prerotate");
       }
 
+      /* the app does the rotating, so no rotated copy is needed for this */
+      if (driCheckOption(dri_options, "vk_wsi_wayland_prerotate_report", DRI_BOOL) &&
+          driQueryOptionb(dri_options, "vk_wsi_wayland_prerotate_report") &&
+          driCheckOption(dri_options, "vk_wsi_wayland_prerotate", DRI_INT)) {
+         wsi->wayland.report_degrees =
+            driQueryOptioni(dri_options, "vk_wsi_wayland_prerotate");
+      }
+
    }
 
    /* can_present_on_device is a function pointer used to determine if images

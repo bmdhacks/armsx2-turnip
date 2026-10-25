@@ -186,6 +186,12 @@ struct wsi_device {
        * 0 if off. Needs VK_QCOM_rotated_copy_commands.
        */
       uint32_t prerotate_degrees;
+
+      /* With vk_wsi_wayland_prerotate_report: the vk_wsi_wayland_prerotate
+       * transform, reported as currentTransform to an app that pre-rotates
+       * itself. 0 if off.
+       */
+      uint32_t report_degrees;
    } wayland;
 
    /*
