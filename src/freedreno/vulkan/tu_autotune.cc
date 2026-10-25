@@ -1168,12 +1168,18 @@ struct tu_autotune::rp_history {
           * count above: a pass of 1,000 small draws over 10 bins can save a few MB and still lose 1.7 ms. It is
           * converted into bytes with per-GPU constants (get_replay_cost()); they are 0 on a GPU without measured
           * values, which keeps the upstream estimate.
+          *
+          * The bin terms charge bins after the first. The first bin is the one SYSMEM would draw anyway, and a pass
+          * drawn as a single bin replays nothing, so it is charged nothing. Charging every bin sent small one-bin
+          * passes to SYSMEM for a cost the hardware does not have; offline, charging bins - 1 removed every
+          * wrong-way flip of a one-bin pass on the four GPUs measured.
           */
          const VkExtent2D &tiles = cmd_state->tiling->vsc.tile_count;
          const uint64_t bins = static_cast<uint64_t>(tiles.width) * tiles.height;
+         const uint64_t replayed_bins = bins > 1 ? bins - 1 : 0;
          const uint64_t replay_bandwidth =
-            rp_state->drawcall_count * (replay.per_draw + static_cast<uint64_t>(replay.per_draw_bin) * bins) +
-            static_cast<uint64_t>(replay.per_bin) * bins;
+            rp_state->drawcall_count * (replay.per_draw + static_cast<uint64_t>(replay.per_draw_bin) * replayed_bins) +
+            static_cast<uint64_t>(replay.per_bin) * replayed_bins;
 
          /* Drawcalls access the memory in SYSMEM rendering (ignoring CCU).
           *

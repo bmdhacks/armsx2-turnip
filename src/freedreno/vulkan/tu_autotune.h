@@ -242,8 +242,9 @@ struct tu_autotune {
    void log_stats(uint64_t now);
 
    /* ARMSX2: the BANDWIDTH algorithm's cost, in its byte units, of GMEM walking the draw stream in the binning pass
-    * and once more per bin: draws * (per_draw + per_draw_bin * bins) + per_bin * bins is added to the GMEM side. Set
-    * per GPU in get_replay_cost(), 0 (upstream's estimate) on any GPU without a measured value.
+    * and once more per bin: draws * (per_draw + per_draw_bin * replayed_bins) + per_bin * replayed_bins is added to
+    * the GMEM side, where replayed_bins is the bin count minus the first bin (0 for a one-bin pass). Set per GPU in
+    * get_replay_cost(), 0 (upstream's estimate) on any GPU without a measured value.
     */
    struct replay_cost_t {
       uint32_t per_draw = 0;
