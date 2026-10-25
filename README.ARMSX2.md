@@ -2,12 +2,13 @@
 
 This is Mesa, with the changes [ARMSX2](https://github.com/ARMSX2/ARMSX2) — an
 ARM64 PlayStation 2 emulator — makes to **Turnip**, the open Vulkan driver for
-Qualcomm Adreno GPUs (`src/freedreno/vulkan/`). Outside Turnip there are four
-small changes, each described below: a build switch in the Wayland
-window-system code, a faster dynamic-state copy in the shared Vulkan runtime
-(`src/vulkan/runtime/`), the Adreno 722 entry in the freedreno device table
-(`src/freedreno/common/`), and a gralloc fix for newer Qualcomm buffer handles
-(`src/util/u_gralloc/`).
+Qualcomm Adreno GPUs (`src/freedreno/vulkan/`). Outside Turnip there are a few
+smaller changes, each described below: rotated presents and a build switch in the
+Wayland window-system code, compressed swapchain buffers on Android
+(`src/vulkan/wsi/`), a faster dynamic-state copy in the shared Vulkan runtime
+(`src/vulkan/runtime/`), the Adreno 613 and 722 entries in the freedreno device
+table (`src/freedreno/common/`), and two gralloc fixes for newer Qualcomm buffer
+handles (`src/util/u_gralloc/`).
 
 The emulator's GS (graphics) renderer reads the render target it is drawing into,
 inside the render pass, on almost every frame of many games. How a driver makes
@@ -80,6 +81,16 @@ PREFER_SYSMEM on the Adreno 610`).** On a Snapdragon 662 a PS2 replay took
 50.3 ms a frame with the default algorithm and 23.0 ms with
 `TU_AUTOTUNE_ALGO=prefer_sysmem`, with identical pixels. Only the 610 changes;
 `TU_AUTOTUNE_ALGO` and the drirc option still override it.
+
+**Adreno 613 (`tu: default to double threadsize and PREFER_SYSMEM on the Adreno
+613`).** The Anbernic RG 55G1's GPU, which Qualcomm's driver calls "Adreno (TM) A12".
+Qualcomm's driver runs every fragment shader 128 wide on it; Turnip's table for the
+608/612/613 family turned double threadsize off. The 613 gets its own entry with it
+on, and the autotuner defaults to PREFER_SYSMEM as on the 610. On an RG 55G1 with
+pinned clocks, 17 ARMSX2 GS dumps: GPU-inclusive time per drawn frame down 7.8% at
+1x and 17.6% at 2x on average, no dump slower, every frame identical.
+`FD_DEV_FEATURES=supports_double_threadsize=0` and `TU_AUTOTUNE_ALGO=bandwidth`
+restore the previous behaviour.
 
 **Adreno 722 (Snapdragon 7 Gen 4 / Dragonwing Q-7790, Retroid Pocket Duo).**
 Five commits (three more, taken from Qualcomm's driver, are described after the
@@ -226,13 +237,52 @@ GPU behaves as in `axfl2-005`. The record is in the ARMSX2 umbrella,
 the ARM Linux build target an older `libwayland` than the build host has. It changes
 nothing unless the build defines `WSI_WL_NO_FIXES`.
 
+**Compressed swapchain buffers on Android (`vulkan: optional compressed (UBWC)
+swapchain buffers`, `… report the compressed swapchain usage in
+androidHardwareBufferUsage too`, `u_gralloc: find the UBWC flag in a handle without
+the magic on Android 16`, `vulkan: ask for a compressed swapchain buffer by
+default`).** Turnip asked gralloc for linear swapchain buffers; Qualcomm's driver
+asks for UBWC-compressed ones. On a device whose panel is portrait and shown
+landscape (RG 55G1, Retroid Pocket Duo) the display hardware can rotate a compressed
+buffer but not a linear one, so SurfaceFlinger composed every frame of the game
+layer on the GPU. The swapchain now asks for compressed buffers, through both the
+gralloc-usage and the `androidHardwareBufferUsage` paths (Android 15 and later use
+the second), and the gralloc fallback reads the UBWC flag from Android 16 handles
+that carry no magic, without which the Duo's picture was garbage. Measured in
+ARMSX2: RG 55G1 GPU busy 98% to 78%, with SurfaceFlinger's 16.5% gone; Duo 53% to
+47% (Shadow of the Colossus) and 63% to 51% (Burnout 3). The Retroid Pocket Nova,
+whose platform already shows the game unrotated, is unaffected.
+`TU_SWAPCHAIN_UBWC=0` turns it off.
+
+**Rotated presents on Wayland (`wsi/wayland: sort surface formats by preference`,
+`wsi: add vkCmdBlitImage2 to the dispatch table`, `wsi/wayland: support rotated
+preTransform`, `… add optional pre-rotated presents`, `… keep the modifier on
+feedback changes when pre-rotating`, `… resend a rotated buffer transform with every
+present`, by sunshineinabox; `… report the pre-rotation transform to apps that rotate
+themselves`, `… keep an app-rotated swapchain on feedback changes too`).** On a
+handheld whose panel the compositor rotates (sway `transform` on ROCKNIX), every
+client buffer was rotated on the GPU by the compositor and could not be scanned out.
+The Wayland swapchain now accepts a rotated `preTransform` and tags the buffers with
+the matching `wl_surface` buffer transform, so an app that renders rotated (ARMSX2
+does, reading the rotation from its toolkit) is scanned out directly. A swapchain
+that is rotated keeps its buffers while its modifier is still offered, since the
+dma-buf feedback changes each time the compositor starts or stops scanning it out.
+For apps that render unrotated, the driconf option `vk_wsi_wayland_prerotate` (the
+output's rotation in degrees) blits each present into a rotated buffer with
+`VK_QCOM_rotated_copy_commands`, and `vk_wsi_wayland_prerotate_report` reports that
+rotation as `currentTransform` instead, for apps that rotate themselves. Both are
+off by default. Measured with ARMSX2 on a rotated-panel ROCKNIX handheld (MQ65):
+sway's GPU time 41.7 ms/s to 0, with the emulator's own buffers scanned out.
+
 ## How the emulator knows it is running one of these builds
 
 Every pack is built with `MESA_GIT_SHA1_OVERRIDE=<tag>`, so
 `VkPhysicalDeviceDriverProperties::driverInfo` reads, for example,
 `Mesa 27.0.0-devel (git-axfl2-003)`. The `axfl<N>-` prefix names the *fix generation*
 the build carries: generation 1 is the Adreno 6xx change, generation 2 adds the
-Adreno 7xx change. ARMSX2's driver database trusts the barrier-less in-pass read
+Adreno 7xx change, and generation 3 (from `axfl3-001`) adds the draw replay cost in
+the autotuner, which the emulator's feedback-loop handling may rely on. Emulators
+that only know generation 2 treat 3 as 2. ARMSX2's driver database trusts the barrier-less in-pass read
 only when it sees that prefix from a Turnip driver, and falls back to its own
 barriers on every other driver. A pack built from this tree without the tag is a
 correct driver that the emulator treats as stock.
