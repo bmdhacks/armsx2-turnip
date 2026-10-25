@@ -1353,11 +1353,21 @@ vk_android_get_ahb_image_properties(
                        "format (%u) unsupported for AHB", info->format);
    }
 
-   const uint64_t ahb_usage = vk_image_format_info_to_ahb_usage(info);
+   uint64_t ahb_usage = vk_image_format_info_to_ahb_usage(info);
    if (!vk_ahb_probe_format(ahb_format, ahb_usage)) {
       return vk_errorf(pdevice, VK_ERROR_FORMAT_NOT_SUPPORTED,
                        "ahb_format (%u) ahb_usage (0x%" PRIx64 ") unsupported",
                        ahb_format, ahb_usage);
+   }
+
+   /* The loader asks for the swapchain image's producer usage here (Android 15/16: it allocates the
+    * swapchain through AHardwareBuffer and reads androidHardwareBufferUsage; it never calls
+    * vkGetSwapchainGrallocUsage2ANDROID). Add the extra vendor bits from TU_SWAPCHAIN_UBWC, but only if
+    * gralloc still says the format is supported with them. */
+   const uint64_t extra_usage = swapchain_extra_usage();
+   if (extra_usage != 0 && vk_ahb_probe_format(ahb_format, ahb_usage | extra_usage)) {
+      ahb_usage |= extra_usage;
+      mesa_logi("swapchain: AHB image format properties report usage 0x%" PRIx64, ahb_usage);
    }
 
    external_props =
