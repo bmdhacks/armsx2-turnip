@@ -380,12 +380,13 @@ tu_autotune::get_env_config()
  */
 struct replay_cost_entry {
    const char *name; /* fd_dev_name() */
+   uint32_t per_draw;
    uint32_t per_draw_bin;
    uint32_t per_bin;
 };
 
 static constexpr replay_cost_entry replay_cost_table[] = {
-   { "FD722", 1800, 0 },
+   { "FD722", 0, 1800, 0 },
 };
 
 tu_autotune::replay_cost_t
@@ -395,18 +396,22 @@ tu_autotune::get_replay_cost() const
    const char *name = fd_dev_name(&device->physical_device->dev_id);
    for (const replay_cost_entry &entry : replay_cost_table) {
       if (name && !strcmp(name, entry.name)) {
+         cost.per_draw = entry.per_draw;
          cost.per_draw_bin = entry.per_draw_bin;
          cost.per_bin = entry.per_bin;
       }
    }
 
-   /* Calibration and A/B. On Android these are debug.mesa.tu.autotune.replay.k and debug.mesa.tu.autotune.replay.bin. */
+   /* Calibration and A/B. On Android these are debug.mesa.tu.autotune.replay.draw, debug.mesa.tu.autotune.replay.k and
+    * debug.mesa.tu.autotune.replay.bin.
+    */
+   cost.per_draw = CLAMP(debug_get_num_option("TU_AUTOTUNE_REPLAY_DRAW", cost.per_draw), 0, UINT32_MAX);
    cost.per_draw_bin = CLAMP(debug_get_num_option("TU_AUTOTUNE_REPLAY_K", cost.per_draw_bin), 0, UINT32_MAX);
    cost.per_bin = CLAMP(debug_get_num_option("TU_AUTOTUNE_REPLAY_BIN", cost.per_bin), 0, UINT32_MAX);
 
    if (TU_DEBUG(STARTUP))
-      mesa_logi("TU_AUTOTUNE: %s replay cost %" PRIu32 " per draw and bin, %" PRIu32 " per bin", name ? name : "?",
-                cost.per_draw_bin, cost.per_bin);
+      mesa_logi("TU_AUTOTUNE: %s replay cost %" PRIu32 " per draw, %" PRIu32 " per draw and bin, %" PRIu32 " per bin",
+                name ? name : "?", cost.per_draw, cost.per_draw_bin, cost.per_bin);
 
    return cost;
 }
@@ -1158,15 +1163,17 @@ struct tu_autotune::rp_history {
          };
 
          /* ARMSX2: GMEM walks the whole draw stream once in the binning pass and once more for every bin, where
-          * SYSMEM walks it once. Draws outside a bin are skipped, but the command processor still reads their packets,
-          * and that time scales with draws times bins, not with any byte count above. A pass of 1,000 small draws
-          * over 10 bins can save a few MB and still lose 1.7 ms. The cost is converted into bytes with a per-GPU
-          * constant (get_replay_cost()); it is 0 on a GPU without a measured value, which keeps the upstream estimate.
+          * SYSMEM walks it once. Draws outside a bin are skipped, but the command processor still reads their packets.
+          * That time grows with draws (the binning walk) and with draws times bins (the skips), not with any byte
+          * count above: a pass of 1,000 small draws over 10 bins can save a few MB and still lose 1.7 ms. It is
+          * converted into bytes with per-GPU constants (get_replay_cost()); they are 0 on a GPU without measured
+          * values, which keeps the upstream estimate.
           */
          const VkExtent2D &tiles = cmd_state->tiling->vsc.tile_count;
          const uint64_t bins = static_cast<uint64_t>(tiles.width) * tiles.height;
          const uint64_t replay_bandwidth =
-            bins * (static_cast<uint64_t>(replay.per_draw_bin) * rp_state->drawcall_count + replay.per_bin);
+            rp_state->drawcall_count * (replay.per_draw + static_cast<uint64_t>(replay.per_draw_bin) * bins) +
+            static_cast<uint64_t>(replay.per_bin) * bins;
 
          /* Drawcalls access the memory in SYSMEM rendering (ignoring CCU).
           *
@@ -1843,8 +1850,9 @@ tu_autotune::tu_autotune(struct tu_device *device, VkResult &result)
 
    stats_enabled = debug_get_bool_option("TU_AUTOTUNE_STATS", false);
    if (stats_enabled)
-      mesa_logi("autotune: %s, replay cost %" PRIu32 " per draw and bin, %" PRIu32 " per bin",
-                active_config.load().to_string().c_str(), replay_cost.per_draw_bin, replay_cost.per_bin);
+      mesa_logi("autotune: %s, replay cost %" PRIu32 " per draw, %" PRIu32 " per draw and bin, %" PRIu32 " per bin",
+                active_config.load().to_string().c_str(), replay_cost.per_draw, replay_cost.per_draw_bin,
+                replay_cost.per_bin);
 
    const char *log_path = os_get_option("TU_AUTOTUNE_LOG");
    if (log_path && *log_path) {
@@ -1853,10 +1861,11 @@ tu_autotune::tu_autotune(struct tu_device *device, VkResult &result)
          decision_log_start_ns = os_time_get_nano();
          const char *name = fd_dev_name(&device->physical_device->dev_id);
          fprintf(decision_log,
-                 "# tu autotune decision log: gpu=%s chip_id=0x%" PRIx64 " %s replay_k=%" PRIu32 " replay_bin=%" PRIu32
-                 "\n",
+                 "# tu autotune decision log: gpu=%s chip_id=0x%" PRIx64 " %s replay_draw=%" PRIu32 " replay_k=%" PRIu32
+                 " replay_bin=%" PRIu32 "\n",
                  name ? name : "?", device->physical_device->dev_id.chip_id,
-                 active_config.load().to_string().c_str(), replay_cost.per_draw_bin, replay_cost.per_bin);
+                 active_config.load().to_string().c_str(), replay_cost.per_draw, replay_cost.per_draw_bin,
+                 replay_cost.per_bin);
       } else {
          mesa_logw("autotune: cannot open TU_AUTOTUNE_LOG=%s", log_path);
       }

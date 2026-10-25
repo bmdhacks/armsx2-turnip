@@ -241,11 +241,12 @@ struct tu_autotune {
    bool stats_enabled = false;
    void log_stats(uint64_t now);
 
-   /* ARMSX2: the BANDWIDTH algorithm's cost, in its byte units, of GMEM walking the draw stream once more per bin:
-    * per_draw_bin * draws * bins + per_bin * bins is added to the GMEM side. Set per GPU in get_replay_cost(), 0
-    * (upstream's estimate) on any GPU without a measured value.
+   /* ARMSX2: the BANDWIDTH algorithm's cost, in its byte units, of GMEM walking the draw stream in the binning pass
+    * and once more per bin: draws * (per_draw + per_draw_bin * bins) + per_bin * bins is added to the GMEM side. Set
+    * per GPU in get_replay_cost(), 0 (upstream's estimate) on any GPU without a measured value.
     */
    struct replay_cost_t {
+      uint32_t per_draw = 0;
       uint32_t per_draw_bin = 0;
       uint32_t per_bin = 0;
    } replay_cost;
