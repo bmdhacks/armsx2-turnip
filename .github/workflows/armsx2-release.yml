@@ -1,0 +1,224 @@
+# Builds the ARMSX2 Turnip driver packs on GitHub's runners.
+#
+# Push a tag (axfl3-002, ...) on the commit to release: both packs are built from that
+# commit, gated, and attached to a DRAFT release for the tag. Write the release notes
+# above the generated "Technical details" section, then publish. Drafts are not
+# returned by the unauthenticated releases API, so the ARMSX2 app does not list one
+# until it is published.
+#
+# Run the workflow by hand (workflow_dispatch) to build any ref without releasing;
+# the packs are kept as a workflow artifact.
+#
+# The tag is the build tag: it is baked into the driver's Vulkan driverInfo as
+# "(git-<tag>)", which is how ARMSX2 identifies the build and its fix generation.
+# At most 10 characters of [A-Za-z0-9._-]. The scripts this runs are in
+# .github/armsx2/; see .github/armsx2/README.md.
+
+name: ARMSX2 release
+
+on:
+  push:
+    tags: ['axfl*']
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Mesa ref to build (branch, tag or commit)'
+        required: true
+        default: 'armsx2/main'
+      build_tag:
+        description: 'Build tag, baked into driverInfo as (git-TAG); at most 10 characters'
+        required: true
+        default: 'ci-test'
+
+permissions:
+  contents: read
+
+env:
+  BUILD_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.build_tag || 'ci-test' }}
+  SOURCE_REF: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || inputs.ref || github.sha }}
+  MESON_VERSION: '1.10.2'
+  NDK_VERSION: '28.2.13676358'
+  ANDROID_API: '29'
+
+jobs:
+  linux:
+    name: ARM Linux (ROCKNIX)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check out the build scripts
+        uses: actions/checkout@v4
+        with:
+          path: ci
+          sparse-checkout: .github/armsx2
+
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          path: src
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            ninja-build pkg-config bison flex python3-venv glslang-tools zstd \
+            libdrm-dev libexpat1-dev libzstd-dev zlib1g-dev libudev-dev libcap-dev \
+            libwayland-dev libwayland-bin wayland-protocols \
+            libx11-dev libx11-xcb-dev libxext-dev libxfixes-dev libxrandr-dev \
+            libxcb1-dev libxcb-dri3-dev libxcb-present-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+            libxcb-randr0-dev libxcb-sync-dev libxcb-keysyms1-dev libxshmfence-dev
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q "meson==$MESON_VERSION" mako pyyaml packaging
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Build and gate (sd865 baseline)
+        run: |
+          ci/.github/armsx2/linux/build-turnip.sh \
+            --build-tag "$BUILD_TAG" \
+            --mesa-clone src --ref "$SOURCE_REF" \
+            --platforms x11,wayland \
+            --baseline ci/.github/armsx2/linux/device-baseline/sd865.json \
+            --work "$RUNNER_TEMP/work" --jobs "$(nproc)"
+
+      - name: Gate against the mq65 baseline
+        run: |
+          python3 ci/.github/armsx2/linux/check-turnip.py \
+            --package "$RUNNER_TEMP/work/out/turnip-$BUILD_TAG" \
+            --baseline ci/.github/armsx2/linux/device-baseline/mq65.json
+
+      - name: Copy the manifest out for the release notes
+        run: cp "$RUNNER_TEMP/work/out/turnip-$BUILD_TAG/MANIFEST.json" "$RUNNER_TEMP/work/out/MANIFEST-linux.json"
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-linux
+          path: ${{ runner.temp }}/work/logs/
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pack-linux
+          path: |
+            ${{ runner.temp }}/work/out/turnip-${{ env.BUILD_TAG }}-aarch64.tar.gz
+            ${{ runner.temp }}/work/out/turnip-${{ env.BUILD_TAG }}-aarch64.tar.gz.sha256
+            ${{ runner.temp }}/work/out/MANIFEST-linux.json
+          if-no-files-found: error
+
+  android:
+    name: Android
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the build scripts
+        uses: actions/checkout@v4
+        with:
+          path: ci
+          sparse-checkout: .github/armsx2
+
+      - name: Check out the source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          path: src
+          fetch-depth: 1
+
+      - name: Install build dependencies and NDK ${{ env.NDK_VERSION }}
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            ninja-build bison flex python3-venv glslang-tools zstd zip
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q "meson==$MESON_VERSION" mako pyyaml packaging
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          test -x "$ANDROID_HOME/ndk/$NDK_VERSION/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android$ANDROID_API-clang"
+
+      - name: Export the source
+        run: |
+          # The same tarball and provenance file export-mesa-ref.sh makes.
+          mkdir -p "$RUNNER_TEMP/export"
+          SHA="$(git -C src rev-parse HEAD)"
+          git -C src archive --format=tar --prefix=mesa/ "$SHA" | zstd -T0 -3 -q -o "$RUNNER_TEMP/export/mesa-src.tar.zst"
+          python3 - "$RUNNER_TEMP/export/mesa-src.provenance.json" "$SOURCE_REF" "$SHA" "$(tr -d '[:space:]' < src/VERSION)" <<'PY'
+          import json, sys
+          out, ref, sha, version = sys.argv[1:5]
+          json.dump({"mesa_ref": ref, "mesa_commit": sha, "mesa_version": version}, open(out, "w"), indent=2)
+          PY
+
+      - name: Build and gate
+        run: |
+          ci/.github/armsx2/android/build-turnip-android.sh \
+            --build-tag "$BUILD_TAG" \
+            --src-tar "$RUNNER_TEMP/export/mesa-src.tar.zst" \
+            --name "ARMSX2 Turnip $BUILD_TAG" \
+            --api "$ANDROID_API" \
+            --ndk "$ANDROID_HOME/ndk/$NDK_VERSION" \
+            --venv "$RUNNER_TEMP/venv" \
+            --work "$RUNNER_TEMP/work" --jobs "$(nproc)"
+          cp "$RUNNER_TEMP/work/out/turnip-$BUILD_TAG-android/MANIFEST.json" "$RUNNER_TEMP/work/out/MANIFEST-android.json"
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-android
+          path: ${{ runner.temp }}/work/logs/
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pack-android
+          path: |
+            ${{ runner.temp }}/work/out/turnip-${{ env.BUILD_TAG }}-android.zip
+            ${{ runner.temp }}/work/out/turnip-${{ env.BUILD_TAG }}-android.zip.sha256
+            ${{ runner.temp }}/work/out/MANIFEST-android.json
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [linux, android]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pack-*
+          merge-multiple: true
+          path: packs
+
+      - name: Write the technical details
+        run: |
+          python3 - packs > notes.md <<'PY'
+          import json, os, sys
+          d = sys.argv[1]
+          lin = json.load(open(os.path.join(d, "MANIFEST-linux.json")))
+          and_ = json.load(open(os.path.join(d, "MANIFEST-android.json")))
+          tag = os.environ["BUILD_TAG"]
+          run = f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}'
+          print("<!-- Write the release notes above this line, then publish the draft. -->")
+          print()
+          print("### Technical details")
+          print()
+          print("| | |")
+          print("|---|---|")
+          print(f'| Source | `{lin["mesa_commit"][:10]}` (Mesa {lin["mesa_version"]}) |')
+          print(f'| Driver reports | `Mesa {lin["mesa_version"]} (git-{tag})` |')
+          print(f'| Android `libvulkan_freedreno.so` sha256 | `{and_["sha256"]}` |')
+          print(f'| ARM Linux `libvulkan_freedreno.so` sha256 | `{lin["sha256"]}` |')
+          print(f'| ARM Linux window systems | {lin["platforms"]} |')
+          print(f'| Built by | [GitHub Actions run]({run}) |')
+          PY
+          cat notes.md
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$BUILD_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "Custom Turnip driver for ARMSX2 (Adreno 6xx/7xx) $BUILD_TAG" \
+            --notes-file notes.md \
+            "packs/turnip-$BUILD_TAG-aarch64.tar.gz" "packs/turnip-$BUILD_TAG-aarch64.tar.gz.sha256" \
+            "packs/turnip-$BUILD_TAG-android.zip" "packs/turnip-$BUILD_TAG-android.zip.sha256"

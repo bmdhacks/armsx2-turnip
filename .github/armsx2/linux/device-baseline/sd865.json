@@ -1,0 +1,55 @@
+{
+  "device": "sd865",
+  "description": "Retroid Pocket Flip2, SM8250, Adreno 650 (a6xx gen3), ROCKNIX 20260705 nightly",
+  "arch_baseline": "armv8.2-a+lse",
+  "requires_outline_atomics": false,
+  "provided_libs": [
+    "libexpat.so.1",
+    "libz.so.1",
+    "libzstd.so.1",
+    "libdrm.so.2",
+    "libudev.so.1",
+    "libstdc++.so.6",
+    "libm.so.6",
+    "libgcc_s.so.1",
+    "libc.so.6",
+    "libwayland-client.so.0",
+    "libxcb.so.1",
+    "libX11-xcb.so.1",
+    "libxcb-dri3.so.0",
+    "libxcb-present.so.0",
+    "libxcb-xfixes.so.0",
+    "libxcb-sync.so.1",
+    "libxcb-randr.so.0",
+    "libxcb-shm.so.0",
+    "libxshmfence.so.1",
+    "libxcb-keysyms.so.1",
+    "ld-linux-aarch64.so.1"
+  ],
+  "max_symbol_versions": {
+    "GLIBC": "2.41",
+    "GLIBCXX": "3.4.33",
+    "CXXABI": "1.3.15",
+    "ZLIB": "1.2.3.3",
+    "LIBUDEV": "183"
+  },
+  "provenance": {
+    "arch_baseline": "OBSERVED - Kryo 3xx, ARMv8.2+LSE; a -march=armv8.2-a binary runs here and SIGILLs on the MQ65 (memory reference_mq65_armv8_0_no_lse_deploy)",
+    "provided_libs": "OBSERVED - the 2026-09-03 symbolised-Turnip load reported nothing missing from ldd with this exact NEEDED set, and lib-fallback was never used (campaigns/gs-classic-tiler/phase5-per-draw-attribution/RESULT-sd865-symbols.md) libwayland-client.so.0 added 2026-09-22: `ls /usr/lib/libwayland-client.so*` on the sd865 shows .so.0 -> .so.0.23.1, and the image's own libvulkan_freedreno.so has it in NEEDED (readelf -d), so a pack built with -Dplatforms=wayland resolves it; needed by the Qt frontend's Wayland presentation, not by the surfaceless runner. X11 libraries added 2026-10-26 for axfl3-x01 (issue #888): `ls /usr/lib/` on the sd865 (ROCKNIX 20260930, kernel 7.2.0) shows libxcb.so.1, libX11-xcb.so.1, libxcb-dri3.so.0, libxcb-present.so.0, libxcb-xfixes.so.0, libxcb-sync.so.1, libxcb-randr.so.0, libxcb-shm.so.0, libxshmfence.so.1 and libxcb-keysyms.so.1, although the session is sway (Wayland). Presence only: versions not recorded, but the device's libxcb-dri3 exports xcb_dri3_import_syncobj and libxcb-present exports xcb_present_pixmap_synced, the two newest entry points Mesa can use (HAVE_DRI3_EXPLICIT_SYNC, gated on xcb-dri3 1.17). ld-linux-aarch64.so.1 added 2026-10-26: glibc's dynamic loader, present at /lib and /usr/lib on both ROCKNIX handhelds (ls); a driver linked by Ubuntu 24.04's toolchain (the GitHub Actions release build) lists it in NEEDED, the Fedora 42 build did not.",
+    "GLIBC": "OBSERVED - glibc 2.41 (memory project_sd865_baseline_and_bringup, project_rocknix_sd865_qt_deploy, perf/devices/sd865.env). ROCKNIX's own glibc package at the image's era is also 2.41.",
+    "GLIBCXX": "DERIVED - device libstdc++ is 6.0.34, asserted to provide through GLIBCXX_3.4.33 (turnip-26.1.2-symbols/RECIPE.md). The same-version file on the Fedora build host provides 3.4.34; 3.4.33 is kept as the conservative ceiling. Note the runner puts /storage/pcsx2/lib on LD_LIBRARY_PATH and that directory carries its own libstdc++.so.6, copied from this build host - so that is the copy the driver usually binds to.",
+    "CXXABI": "DERIVED - from libstdc++ 6.0.34; never probed on the device. Turnip's requirement (1.3.9) is far below any plausible value, so this ceiling has never been load-bearing.",
+    "ZLIB": "FLOOR ONLY - ZLIB_1.2.3.3 and LIBUDEV_183 are what the 2026-09-03 driver required and resolved on device. The device's actual zlib/udev versions are NOT recorded, so a build needing anything newer must be re-checked on the device before it is trusted."
+  },
+  "unverified": [
+    "Where the image's own ICD manifests live (/usr/share/vulkan/icd.d has never been listed on this device). Irrelevant while we override with VK_DRIVER_FILES, which names our file by absolute path.",
+    "The exact versions of libdrm / libudev / libexpat / libzstd / libz on the image. Only their presence is proven."
+  ],
+  "notes": [
+    "/storage is writable ext4, 37.7G total with ~9G free as of 2026-09-05. /root and the rootfs are read-only squashfs, so a system-wide driver install is impossible by construction - which is the point.",
+    "Kernel 7.1.2. GPU is the mainline msm DRM driver (/dev/dri/renderD128), not downstream kgsl - Turnip's only supported kernel interface here.",
+    "Stock driver: /usr/lib/libvulkan_freedreno.so, build-id 5a62888f7d1ff776ec0c9b70c0b273e5bd6f707b, stripped, reports Mesa 26.1.2.",
+    "Vulkan loader on the image is /usr/lib/libvulkan.so.1.4.347.",
+    "VK_ICD_FILENAMES / VK_DRIVER_FILES are PROVEN to work here: a 2026-09-03 profile took 5,355 samples in /storage/turnip-sym/libvulkan_freedreno.so and zero in /usr/lib/."
+  ]
+}
