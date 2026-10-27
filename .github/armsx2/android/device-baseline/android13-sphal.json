@@ -1,0 +1,57 @@
+{
+  "device": "android13-sphal",
+  "what_this_describes": "The linker namespace a libadrenotools-loaded Vulkan driver actually runs in on an unrooted Android 13 handheld (the Nova, Adreno 740), not a specific device's file list.",
+  "arch_baseline": "armv8-a",
+  "requires_outline_atomics": true,
+  "min_api": 29,
+
+  "provided_libs": [
+    "libc.so",
+    "libdl.so",
+    "libm.so",
+    "liblog.so",
+    "libnativewindow.so",
+    "libsync.so",
+    "libvndksupport.so",
+    "libandroid.so",
+    "libcutils.so",
+    "libhardware.so",
+    "libbase.so",
+    "libutils.so",
+    "libhidlbase.so",
+    "libz.so",
+    "liblzma.so",
+    "libjsoncpp.so",
+    "libprocessgroup.so",
+    "libbacktrace.so",
+    "libunwindstack.so",
+    "android.hardware.graphics.mapper@4.0.so",
+    "android.hardware.graphics.common@1.2.so"
+  ],
+
+  "forbidden_libs": [
+    "libc++_shared.so",
+    "libc.so.6",
+    "libstdc++.so.6",
+    "libdrm.so.2",
+    "libexpat.so.1",
+    "libudev.so.1",
+    "libwayland-client.so.0",
+    "libxcb.so.1"
+  ],
+
+  "provenance": {
+    "provided_libs": "DERIVED - LLNDK plus VNDK-SP, the two sets the sphal namespace links to on an Android 13 (VNDK-era) image. Read off AOSP's ld.config.txt shape and the VNDK-SP list, not off a device.",
+    "namespace": "DERIVED - adrenotools src/hook/hook_impl.cpp:141-156 takes android_get_exported_namespace(\"sphal\"|\"vendor\"|\"default\") and :57-59 makes the driver's namespace a SHARED child of it, with the pack directory as its ld_library_path. Read in the vendored copy under ARMSX2/platforms/android/.../3rdparty/adrenotools.",
+    "requires_outline_atomics": "ASSUMED - the Nova is an a740 (ARMv8.2+, has LSE) so this is not needed for IT. It is set true so the SAME pack stays safe on an ARMv8.0 Adreno 610 Android handheld, which is the only way one pack serves the fleet.",
+    "min_api": "DERIVED - adrenotools src/driver.cpp:21-26: it bails when linkernsbypass failed (api < 28), and ARMSX2 passes tmpLibDir = nullptr (VKLoader.cpp:96), which needs the memfd path guaranteed from 29.",
+    "forbidden_libs": "DERIVED - libc++_shared.so is in the APK but not in the driver's namespace search path, and the glibc/Linux names are what a mis-targeted (host or ROCKNIX) build would drag in."
+  },
+
+  "unverified": [
+    "That libcutils.so / libhardware.so / libz.so really resolve for a pack-loaded driver on the Nova. Nothing in this round touched a device. The argument is that every community Turnip pack is built the same way (-Dandroid-stub=true) and the Nova is running one today, which makes it very likely and still not measured.",
+    "The Nova's exact Android API level. E3 records Android 13 from the app's own reporting; 33 was never read off getprop in a record we hold.",
+    "Whether anything in the pack's namespace shadows a system library by name.",
+    "Every claim about what loads. NOTHING in this directory has been run on a device."
+  ]
+}

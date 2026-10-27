@@ -304,6 +304,11 @@ Each GitHub release is one driver build, with up to two assets:
 
 The `.sha256` files beside each asset are the checksums the build recorded.
 
+Releases are built by GitHub Actions (`.github/workflows/armsx2-release.yml`), not on
+anyone's machine. Pushing a tag such as `axfl3-002` builds both assets from the tagged
+commit, runs the load checks, and creates a draft release; the notes are written and
+the draft published by hand. `.github/armsx2/README.md` has the steps.
+
 ## Building
 
 Android packs are built with the NDK (r28c) against API 29, as a HAL (`HMI`
@@ -327,9 +332,12 @@ entry point), with the same options every community Turnip pack uses:
 extensions behind an Android-CTS whitelist keyed by API level, and the emulator
 needs them. `-moutline-atomics` keeps one pack safe on ARMv8.0 Adreno 610 parts.
 `MESA_GIT_SHA1_OVERRIDE` supplies the tag described above. The ARM Linux builds use
-the equivalent non-Android option set with the Wayland platform
-(`-Dplatforms=wayland`, built with `WSI_WL_NO_FIXES`) and the default (msm) kernel
-interface.
+the equivalent non-Android option set with the X11 and Wayland platforms
+(`-Dplatforms=x11,wayland`, built with `WSI_WL_NO_FIXES`) and the default (msm) kernel
+interface. Builds before the GitHub Actions workflow (up to `axfl3-001`) were Wayland
+only.
+
+The build scripts are in `.github/armsx2/`.
 
 ## Licence
 

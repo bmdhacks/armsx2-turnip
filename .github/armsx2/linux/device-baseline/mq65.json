@@ -1,0 +1,56 @@
+{
+  "device": "mq65",
+  "description": "MANGMI Air X, SM6115, Adreno 610 (a6xx), ROCKNIX 20260711",
+  "arch_baseline": "armv8.0-a",
+  "requires_outline_atomics": true,
+  "provided_libs": [
+    "libexpat.so.1",
+    "libz.so.1",
+    "libzstd.so.1",
+    "libdrm.so.2",
+    "libudev.so.1",
+    "libstdc++.so.6",
+    "libm.so.6",
+    "libgcc_s.so.1",
+    "libc.so.6",
+    "libwayland-client.so.0",
+    "libxcb.so.1",
+    "libX11-xcb.so.1",
+    "libxcb-dri3.so.0",
+    "libxcb-present.so.0",
+    "libxcb-xfixes.so.0",
+    "libxcb-sync.so.1",
+    "libxcb-randr.so.0",
+    "libxcb-shm.so.0",
+    "libxshmfence.so.1",
+    "libxcb-keysyms.so.1",
+    "ld-linux-aarch64.so.1"
+  ],
+  "max_symbol_versions": {
+    "GLIBC": "2.41",
+    "GLIBCXX": "3.4.33",
+    "CXXABI": "1.3.15",
+    "ZLIB": "1.2.3.3",
+    "LIBUDEV": "183"
+  },
+  "provenance": {
+    "arch_baseline": "OBSERVED - Cortex-A73 Kryo 260, no 'atomics' HWCAP in /proc/cpuinfo, read on the device 2026-07-12 (memory reference_mq65_armv8_0_no_lse_deploy, perf/devices/mq65.env). A host-built library that inlines LSE SIGILLs here; this is measured in both directions, not inferred.",
+    "provided_libs": "ASSUMED - carried over from the SD865. The MQ65 runs the same Turnip version (Mesa 26.1.2) so its driver needs the same set, but no ldd has ever been run against a staged driver on this device. libwayland-client.so.0 added 2026-09-22 on the strength of the sd865 finding (same ROCKNIX image line; the image's driver needs it too) - verify with `ls /usr/lib/libwayland-client.so*` on this device before trusting a wayland pack here. X11 libraries added 2026-10-26 for X11-capable packs (ARMSX2 issue #888): all ten (libxcb.so.1, libX11-xcb.so.1, libxcb-dri3.so.0, libxcb-present.so.0, libxcb-xfixes.so.0, libxcb-sync.so.1, libxcb-randr.so.0, libxcb-shm.so.0, libxshmfence.so.1, libxcb-keysyms.so.1) are present in /usr/lib on the MQ65 (ROCKNIX 20260711), checked with ls. Presence only, versions not recorded. ld-linux-aarch64.so.1 added 2026-10-26: glibc's dynamic loader, present at /lib and /usr/lib on both ROCKNIX handhelds (ls); a driver linked by Ubuntu 24.04's toolchain (the GitHub Actions release build) lists it in NEEDED, the Fedora 42 build did not.",
+    "GLIBC": "ASSUMED - NOT RECORDED for this device. 2.41 is the SD865's figure and the two images are six days apart in the same ROCKNIX family. Treat a pass on this line as unproven.",
+    "GLIBCXX": "PARTIALLY OBSERVED - libstdc++.so.6.0.34 resolves as a DSO in MQ65 perf profiles, so the soname and version are right; the ceiling itself is derived, as on the SD865.",
+    "CXXABI": "DERIVED - as SD865.",
+    "ZLIB": "FLOOR ONLY - as SD865, and never exercised on this device."
+  },
+  "unverified": [
+    "glibc version (never probed on this device).",
+    "Vulkan loader version and the stock Turnip's path/build-id.",
+    "Free space on /storage (no df has ever been captured here).",
+    "Kernel version (uname -r has never been captured)."
+  ],
+  "notes": [
+    "The GPU is the mainline msm DRM driver here too - confirmed by drm-driver: msm in fdinfo, so no kgsl fallback is needed.",
+    "TRAP: ROCKNIX sources /storage/.config/profile.d/* only for LOGIN shells. On this device 015-turnip-debug sets TU_DEBUG=noconform, and that is the only reason Turnip reports Vulkan 1.3 on the Adreno 610. A plain 'ssh dev cmd' gets a non-login shell, a Vulkan-1.0-only device, and a backend that refuses to start. Any driver swap tested here must run under the same shell kind as the runs it will be compared against, or the arm fails for a reason that has nothing to do with the driver.",
+    "TRAP: TU_DEBUG being non-empty at all defeats a per-draw early-out in tu_emit_cache_flush_renderpass, so this device's default environment is already off the SD865's code path. Any timing taken here needs a matching '-forced' control.",
+    "3.5 GiB RAM, 4 KiB pages."
+  ]
+}
