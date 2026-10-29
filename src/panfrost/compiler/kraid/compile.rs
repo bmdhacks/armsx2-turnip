@@ -60,6 +60,7 @@ fn nir_opts(arch: u8, merge_wg: bool) -> nir_shader_compiler_options {
 
         has_ldexp: true,
         has_isub: true,
+        has_f2i32_rtne: true,
         vectorize_vec2_16bit: true,
         float_mul_add16: nir_float_muladd_support_has_ffma
             | nir_float_muladd_support_fuse,
