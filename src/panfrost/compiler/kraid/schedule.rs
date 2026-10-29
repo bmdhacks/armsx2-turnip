@@ -199,6 +199,17 @@ impl DepTracker {
     }
 }
 
+/// The most registers a block may keep live for the rescheduled order to be
+/// kept when it is not the lower-pressure one (see `pressure_schedule_block`).
+/// 32 registers is the most a shader can use and still run the maximum
+/// number of threads (`Model::max_threads`); this leaves a few for the
+/// register allocator's alignment and copies.
+const TEX_HOIST_MAX_REGS: u32 = 28;
+
+fn is_tex(op: &Op) -> bool {
+    matches!(op, Op::TexSingle(_) | Op::TexDual(_))
+}
+
 fn pressure_schedule_block(
     model: &dyn Model,
     ssa_alloc: &SSAValueAllocator,
@@ -222,6 +233,13 @@ fn pressure_schedule_block(
         max_live = max_live.max(bytes);
     }
 
+    // A block with texture instructions is scheduled so that they issue as
+    // early as the register budget allows: the schedule is built from the
+    // bottom up, so the texture instruction is chosen last of the ready
+    // ones and ends up first, and the arithmetic that does not depend on its
+    // result runs while the texture unit works.
+    let has_tex = body_range.clone().any(|ip| is_tex(&b.instrs[ip].op));
+
     let mut end_ip = body_range.end;
     let mut schedule: Vec<_> = (0..b.instrs.len())
         .map(|ip| {
@@ -236,7 +254,9 @@ fn pressure_schedule_block(
     loop {
         let mut best_ip = usize::MAX;
         let mut best_pressure = i32::MAX;
+        let mut best_is_tex = true;
         for ip in deps.ready() {
+            let ip_is_tex = has_tex && is_tex(&b.instrs[ip].op);
             let mut rel_pressure = 0_i32;
             for ssa in b.instrs[ip].iter_ssa_defs() {
                 if live.contains(ssa) {
@@ -248,9 +268,15 @@ fn pressure_schedule_block(
                     rel_pressure += i32::from(ssa.bytes());
                 }
             }
-            if rel_pressure <= best_pressure {
+            let better = if ip_is_tex != best_is_tex {
+                !ip_is_tex
+            } else {
+                rel_pressure <= best_pressure
+            };
+            if best_ip == usize::MAX || better {
                 best_ip = ip;
                 best_pressure = rel_pressure;
+                best_is_tex = ip_is_tex;
             }
         }
 
@@ -272,8 +298,11 @@ fn pressure_schedule_block(
     // Assert we placed all of them
     assert!(end_ip == body_range.start);
 
-    // Replace with the new scheduling if it's better.
-    if max_live.reg < bl.max_live_bytes().reg {
+    // Replace with the new scheduling if it's better, or, in a block with
+    // texture instructions, if it still fits in the registers.
+    if max_live.reg < bl.max_live_bytes().reg
+        || (has_tex && max_live.reg <= 4 * TEX_HOIST_MAX_REGS)
+    {
         // SAFETY:
         //
         // We already asserted that we placed each instruction exactly once.
