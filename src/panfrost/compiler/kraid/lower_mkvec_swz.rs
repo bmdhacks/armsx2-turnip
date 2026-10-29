@@ -385,6 +385,17 @@ fn mkvec_vni8<const N: usize>(
             }
         }
 
+        // A constant upper pair is the accumulator of the MKVEC.v2i8 that
+        // builds the lower pair, so it needs no register of its own.
+        if let [Byte::Imm8(hi0), Byte::Imm8(hi1)] = [&bytes[2], &bytes[3]] {
+            b.push_op(OpMkVecV2I8I16 {
+                dst,
+                srcs: [bytes[0].as_src(), bytes[1].as_src()],
+                accum: (u16::from(*hi0) | (u16::from(*hi1) << 8)).into(),
+            });
+            return;
+        }
+
         // If we get here, we're all out of options. We have to do a 2-step
         // MKVEC.v2i8 build
         let tmp = b.alloc_ssa(16);
