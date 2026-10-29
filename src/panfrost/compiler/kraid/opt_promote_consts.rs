@@ -70,6 +70,84 @@ fn fau_emit_const(fau: &mut pan_fau_layout, imm: u32) -> u16 {
     unsafe { pan_fau_emit_const(fau, imm) }.try_into().unwrap()
 }
 
+/// How often each pair of 32-bit constants is read by one instruction.
+///
+/// An instruction can read only one 64-bit FAU slot, so two constants it
+/// reads have to be the two words of the same slot, or the legalizer moves
+/// one of them to a register first.
+fn count_const_pairs(s: &Shader) -> FxHashMap<(NonZeroU32, NonZeroU32), u32> {
+    let mut weight = FxHashMap::default();
+    for block in s.blocks.iter() {
+        for instr in block.instrs.iter() {
+            let mut imms: Vec<NonZeroU32> = Vec::new();
+            for src in instr.srcs() {
+                if let Some(ConstEntry::I32(v)) =
+                    ConstEntry::from_src_promotable(s.model, &instr.op, src)
+                {
+                    if !imms.contains(&v) {
+                        imms.push(v);
+                    }
+                }
+            }
+            if let [a, b] = imms[..] {
+                *weight.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+    }
+    weight
+}
+
+/// Orders the selected 32-bit constants so that the pairs read together sit
+/// in the same 64-bit slot, the most often read pairs first.
+///
+/// The first word of `consts` goes where the FAU already has an odd number
+/// of words (`odd_start`), so a constant that stands alone has to come
+/// first then, and each pair starts on an even word after it.
+fn order_const_pairs(
+    consts: Vec<NonZeroU32>,
+    weight: &FxHashMap<(NonZeroU32, NonZeroU32), u32>,
+    odd_start: bool,
+) -> Vec<NonZeroU32> {
+    let mut pairs: Vec<_> = weight
+        .iter()
+        .filter(|((a, b), _)| consts.contains(a) && consts.contains(b))
+        .collect();
+    pairs.sort_by_key(|(k, w)| Reverse((**w, **k)));
+
+    let mut paired: Vec<(NonZeroU32, NonZeroU32)> = Vec::new();
+    for ((a, b), _) in pairs {
+        if !paired.iter().any(|(x, y)| x == a || x == b || y == a || y == b) {
+            paired.push((*a, *b));
+        }
+    }
+    let mut singles: Vec<NonZeroU32> = consts
+        .iter()
+        .copied()
+        .filter(|c| !paired.iter().any(|(x, y)| x == c || y == c))
+        .collect();
+
+    let mut ordered = Vec::with_capacity(consts.len());
+    if odd_start {
+        if singles.is_empty() {
+            // Give up the least read pair for a leading word.
+            if let Some((a, b)) = paired.pop() {
+                singles.push(a);
+                singles.push(b);
+            }
+        }
+        if !singles.is_empty() {
+            ordered.push(singles.remove(0));
+        }
+    }
+    for (a, b) in paired {
+        ordered.push(a);
+        ordered.push(b);
+    }
+    ordered.extend(singles);
+    debug_assert_eq!(ordered.len(), consts.len());
+    ordered
+}
+
 fn promote_consts(s: &mut Shader, fau: &mut pan_fau_layout) {
     let mut const_table = ConstTable::default();
 
@@ -109,6 +187,12 @@ fn promote_consts(s: &mut Shader, fau: &mut pan_fau_layout) {
             ConstEntry::I64(imm64) => selected64.push(imm64),
         }
     }
+
+    let selected32 = order_const_pairs(
+        selected32,
+        &count_const_pairs(s),
+        fau.count % 2 != 0,
+    );
 
     let mut entry_to_idx = FxHashMap::default();
     let has_wide = !selected64.is_empty();
