@@ -485,6 +485,26 @@ impl LegalizeFAU<'_> {
     }
 }
 
+/// Whether `op` reads all its FAU sources as they are: `legalize_fau_srcs`
+/// would not move any of them to a register.
+pub fn fau_srcs_legal(model: &dyn Model, op: &Op) -> bool {
+    let mut ctx = LegalizeFAU::new(model.fau());
+    ctx.extract_srcs(model, op);
+    if ctx.slots.is_empty() {
+        return ctx.inval_src.is_empty();
+    }
+    if !ctx.inval_src.is_empty() {
+        return false;
+    }
+    let slots = ctx.slots.len();
+    if model.op_is_message(op) {
+        ctx.legalize_message();
+    } else {
+        ctx.legalize_execution_unit();
+    }
+    ctx.slots.len() == slots
+}
+
 fn legalize_fau_srcs(
     b: &mut impl SSABuilder,
     fau_model: &FAUModel,
