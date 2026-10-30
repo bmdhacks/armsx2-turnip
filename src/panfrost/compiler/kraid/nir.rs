@@ -116,6 +116,92 @@ struct ShaderFromNir<'a> {
 }
 
 impl<'a> ShaderFromNir<'a> {
+    /// i2f32 of an extract_u8/extract_i8 with a constant lane is a single
+    /// U8_TO_F32/S8_TO_F32: return the operand and its source type.
+    fn extracted_lane(&self, alu: &nir_alu_instr) -> Option<(Src, DataType)> {
+        /* The 8- and 16-bit float converts exist on v9 and v10 only. */
+        if self.model.arch() > 10 {
+            return None;
+        }
+        if alu.get_src(0_usize).bit_size() != 32 || alu.def.num_components != 1 {
+            return None;
+        }
+        let inner = alu.get_src(0_usize).src.as_def().parent_instr().as_alu()?;
+        let num_type = match inner.op {
+            nir_op_extract_u8 => NumericType::UnsignedInteger,
+            nir_op_extract_i8 => NumericType::SignedInteger,
+            _ => return None,
+        };
+        if inner.def.num_components != 1 || inner.def.bit_size != 32 {
+            return None;
+        }
+        if inner.info().num_inputs < 2 {
+            return None;
+        }
+        let lane = inner.get_src(1_usize).comp_as_uint(0)?;
+        if lane > 3 {
+            return None;
+        }
+        let src = self.get_src(&inner.get_src(0_usize).src).byte(lane as u8);
+        Some((src, DataType::get(1, num_type, 8)))
+    }
+
+    /// Match (x << 16) >>_s 16 and (x << 16) >>_u 16, which are the low 16
+    /// bits of x sign- or zero-extended, and (x << 8) >>_u 8, which is
+    /// x & 0xff.  The *signed* 8-bit pair is not in that set: (x << 8) >>_s 8
+    /// keeps bits 23..8 of x and sign-extends from bit 23, so it equals the
+    /// sign-extended byte only when x already is one, and then it changes
+    /// nothing (see the note in the caller).
+    fn extend_shift_pair(&self, alu: &nir_alu_instr) -> Option<(DataType, Src)> {
+        let signed = match alu.op {
+            nir_op_arshift_or_pan => true,
+            nir_op_rshift_or_pan => false,
+            _ => return None,
+        };
+        if alu.info().num_inputs < 3 {
+            return None;
+        }
+        let bits = match (signed, alu.get_src(1_usize).comp_as_uint(0)) {
+            (true, Some(16)) => DataType::S16,
+            (false, Some(16)) => DataType::U16,
+            (false, Some(8)) => DataType::U8,
+            _ => return None,
+        };
+
+        if alu.def.bit_size != 32 || alu.def.num_components != 1 {
+            return None;
+        }
+        if alu.get_src(2_usize).comp_as_uint(0) != Some(0) {
+            return None;
+        }
+
+        let inner = alu.get_src(0_usize).src.as_def().parent_instr().as_alu()?;
+        if inner.op != nir_op_lshift_or_pan || inner.def.bit_size != 32 {
+            return None;
+        }
+        if inner.info().num_inputs < 3 {
+            return None;
+        }
+        if inner.def.num_components != 1 {
+            return None;
+        }
+        if inner.get_src(1_usize).comp_as_uint(0) != alu.get_src(1_usize).comp_as_uint(0) {
+            return None;
+        }
+        if inner.get_src(2_usize).comp_as_uint(0) != Some(0) {
+            return None;
+        }
+
+        /* The op's source type is the 8- or 16-bit lane it reads, so the
+         * operand is that lane replicated (a free swizzle). */
+        let src = self.get_src(&inner.get_src(0_usize).src);
+        let src = match bits {
+            DataType::S16 | DataType::U16 => src.half(0),
+            _ => src.byte(0),
+        };
+        Some((bits, src))
+    }
+
     fn new(
         model: &'a dyn Model,
         nir: &'a nir_shader,
@@ -535,6 +621,21 @@ impl<'a> ShaderFromNir<'a> {
         };
 
         let dst = self.alloc_ssa(b, &alu.def);
+        /* (x << 16) >>_s 16 sign-extends the low 16 bits of x, and
+         * (x << 16) >>_u 16 / (x << 8) >>_u 8 mask them off; the ISA has a
+         * single instruction for each (S16_TO_S32, U16_TO_U32, U8_TO_U32).
+         * extend_shift_pair lists exactly the forms that are equal to those
+         * instructions -- (x << 8) >>_s 8 is not one of them.
+         */
+        if let Some((src_type, src)) = self.extend_shift_pair(alu) {
+            b.push_op(OpIToI32 {
+                dst: dst.into(),
+                src_type,
+                src,
+            });
+            return;
+        }
+
         let dst_type = |num_type| {
             let comps = alu.def.num_components.next_power_of_two();
             DataType::get(comps, num_type, alu.def.bit_size)
@@ -816,6 +917,22 @@ impl<'a> ShaderFromNir<'a> {
                     }
                     _ => unreachable!(),
                 }
+            }
+            /* Converting an extracted 8-bit lane straight to float is one
+             * instruction, so let the source be the extracted lane and skip
+             * the intermediate zero- or sign-extend.
+             */
+            nir_op_i2f32
+                if self.extracted_lane(alu).is_some() =>
+            {
+                assert!(alu.def.num_components == 1);
+                let (src, src_type) = self.extracted_lane(alu).unwrap();
+                b.push_op(OpIToF32 {
+                    dst: dst.into(),
+                    src_type,
+                    src,
+                    round: self.fround(alu.def.bit_size),
+                });
             }
             nir_op_i2f32 => {
                 assert!(

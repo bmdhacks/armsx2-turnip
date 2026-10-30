@@ -2011,6 +2011,46 @@ impl V9Instr for OpIToF32 {
     }
 }
 
+impl V9Instr for OpIToI32 {
+    fn get_info(&self, arch: u8) -> Option<V9InstrInfo> {
+        let info = match self.src_type {
+            DataType::S8 => S8ToS32::get_info((), arch),
+            DataType::U8 => U8ToU32::get_info((), arch),
+            DataType::S16 => S16ToS32::get_info((), arch),
+            DataType::U16 => U16ToU32::get_info((), arch),
+            _ => unreachable!(),
+        };
+        V9InstrInfo::from_isa(
+            info,
+            src_map! {
+                src0: src,
+            },
+        )
+    }
+
+    fn encode(&self, e: V9Encoder) -> EncodedInstr {
+        match self.src_type {
+            DataType::S8 => e.encode(S8ToS32 {
+                dst: op_encode_dst(self, &self.dst),
+                src0: op_encode_src(self, &self.src),
+            }),
+            DataType::U8 => e.encode(U8ToU32 {
+                dst: op_encode_dst(self, &self.dst),
+                src0: op_encode_src(self, &self.src),
+            }),
+            DataType::S16 => e.encode(S16ToS32 {
+                dst: op_encode_dst(self, &self.dst),
+                src0: op_encode_src(self, &self.src),
+            }),
+            DataType::U16 => e.encode(U16ToU32 {
+                dst: op_encode_dst(self, &self.dst),
+                src0: op_encode_src(self, &self.src),
+            }),
+            _ => unreachable!(),
+        }
+    }
+}
+
 impl V9Instr for OpJump {
     fn get_info(&self, arch: u8) -> Option<V9InstrInfo> {
         V9InstrInfo::from_isa(
@@ -3923,6 +3963,7 @@ macro_rules! v9_op_match_else {
             Op::ISub($x) => $y,
             Op::IToF16($x) => $y,
             Op::IToF32($x) => $y,
+            Op::IToI32($x) => $y,
             Op::Jump($x) => $y,
             Op::LdAttr($x) => $y,
             Op::LdCvt($x) => $y,

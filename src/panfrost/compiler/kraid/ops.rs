@@ -2488,6 +2488,36 @@ impl PerCompFoldable for OpISub {
     }
 }
 
+/// Sign or zero extend an 8- or 16-bit integer to 32 bits
+#[repr(C)]
+#[derive(Clone, Opcode)]
+#[variants(src_type in [S8, U8, S16, U16])]
+pub struct OpIToI32 {
+    #[dst_type(I32)]
+    pub dst: Dst,
+    pub src_type: DataType,
+    pub src: Src,
+}
+
+impl DisplayOp for OpIToI32 {
+    fn fmt_name(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}_TO_{}",
+            self.src_type.to_string().to_uppercase(),
+            match self.src_type {
+                DataType::S8 | DataType::S16 => "S32",
+                DataType::U8 | DataType::U16 => "U32",
+                _ => unreachable!("Invalid variant"),
+            }
+        )
+    }
+
+    fn fmt_body(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.fmt_src(&self.src))
+    }
+}
+
 /// Only available on arch <= v10
 #[repr(C)]
 #[derive(Clone, Opcode)]
@@ -5145,6 +5175,7 @@ pub enum Op {
     ISub(Box<OpISub>),
     IToF16(Box<OpIToF16>),
     IToF32(Box<OpIToF32>),
+    IToI32(Box<OpIToI32>),
     Jump(Box<OpJump>),
     LdAttr(Box<OpLdAttr>),
     LdCvt(Box<OpLdCvt>),
