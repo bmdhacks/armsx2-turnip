@@ -1041,6 +1041,17 @@ bi_write_count(bi_instr *instr, uint64_t live_after_temp)
    return count;
 }
 
+/* The last tuple's writes are encoded by the clause's first tuple, which
+ * has room for one (bi_pack_registers). The packer writes every register
+ * destination whether or not it is live after the clause, so count them
+ * all there; elsewhere a dead write can stay in a temporary. */
+static unsigned
+bi_tuple_write_count(struct bi_tuple_state *tuple, bi_instr *instr,
+                     uint64_t live_after_temp)
+{
+   return bi_write_count(instr, tuple->last ? ~0ull : live_after_temp);
+}
+
 /* Test if an instruction requires a specific flush-to-zero mode. */
 static enum bi_ftz_state
 bi_instr_ftz(bi_context *ctx, bi_instr *I)
@@ -1170,7 +1181,7 @@ bi_instr_schedulable(bi_context *ctx, bi_instr *instr,
 
    /* Register file writes are limited */
    unsigned total_writes = tuple->reg.nr_writes;
-   total_writes += bi_write_count(instr, live_after_temp);
+   total_writes += bi_tuple_write_count(tuple, instr, live_after_temp);
 
    /* Last tuple in a clause can only write a single value */
    if (tuple->last && total_writes > 1)
@@ -1285,7 +1296,7 @@ bi_pop_instr(bi_context *ctx, struct bi_clause_state *clause,
           sizeof(instr->dest[0]) * instr->nr_dests);
    clause->access_count += instr->nr_dests;
 
-   tuple->reg.nr_writes += bi_write_count(instr, live_after_temp);
+   tuple->reg.nr_writes += bi_tuple_write_count(tuple, instr, live_after_temp);
 
    bi_foreach_src(instr, s) {
       if (bi_tuple_is_new_src(instr, &tuple->reg, s))
