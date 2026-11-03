@@ -104,6 +104,67 @@ bi_op_supports_swizzle(enum bi_opcode op, unsigned src,
    return supported_swizzles & BITFIELD_BIT(swizzle);
 }
 
+/* +IADD/+ISUB.v2{s,u}16 (Bifrost, ADD unit only) encode a swapped first
+ * source (H10) only next to a second source of H01 or H10; the per-source
+ * tables (bi_op_swizzles) cannot say so. */
+static bool
+bi_v2i16_add_pair_ok(enum bi_opcode op, enum bi_swizzle swz0,
+                     enum bi_swizzle swz1, unsigned arch)
+{
+   if (arch >= 9)
+      return true;
+
+   switch (op) {
+   case BI_OPCODE_IADD_V2S16:
+   case BI_OPCODE_IADD_V2U16:
+   case BI_OPCODE_ISUB_V2S16:
+   case BI_OPCODE_ISUB_V2U16:
+      return swz0 != BI_SWIZZLE_H10 ||
+             swz1 == BI_SWIZZLE_H01 || swz1 == BI_SWIZZLE_H10;
+   default:
+      return true;
+   }
+}
+
+/* bi_op_supports_swizzle for source src of ins taking swizzle, with the
+ * instruction's other sources as they are. */
+bool
+bi_instr_supports_swizzle(const bi_instr *ins, unsigned src,
+                          enum bi_swizzle swizzle, unsigned arch)
+{
+   if (!bi_op_supports_swizzle(ins->op, src, swizzle, arch))
+      return false;
+   if (src > 1)
+      return true;
+
+   enum bi_swizzle swz0 = src == 0 ? swizzle : ins->src[0].swizzle;
+   enum bi_swizzle swz1 = src == 1 ? swizzle : ins->src[1].swizzle;
+   return bi_v2i16_add_pair_ok(ins->op, swz0, swz1, arch);
+}
+
+/* Moves source src's swizzle into a SWZ before ins. */
+static void
+lower_swizzle_away(bi_context *ctx, bi_instr *ins, unsigned src)
+{
+   if (ins->src[src].type == BI_INDEX_CONSTANT) {
+      ins->src[src].value =
+         bi_apply_swizzle(ins->src[src].value, ins->src[src].swizzle);
+      ins->src[src].swizzle = BI_SWIZZLE_H01;
+      return;
+   }
+
+   bi_builder b = bi_init_builder(ctx, bi_before_instr(ins));
+
+   bi_index orig = ins->src[src];
+   bi_index stripped = bi_replace_index(bi_null(), orig);
+   stripped.swizzle = ins->src[src].swizzle;
+
+   bi_index swz = bi_swz_v4i8(&b, stripped);
+
+   bi_replace_src(ins, src, swz);
+   ins->src[src].swizzle = BI_SWIZZLE_H01;
+}
+
 static void
 lower_swizzle(bi_context *ctx, bi_instr *ins, unsigned src)
 {
@@ -239,6 +300,11 @@ bi_lower_swizzle(bi_context *ctx)
 
          lower_swizzle(ctx, ins, s);
       }
+
+      if (ins->nr_srcs >= 2 &&
+          !bi_v2i16_add_pair_ok(ins->op, ins->src[0].swizzle,
+                                ins->src[1].swizzle, ctx->arch))
+         lower_swizzle_away(ctx, ins, 0);
    }
 
    /* Now that we've lowered swizzles, clean up the mess */
