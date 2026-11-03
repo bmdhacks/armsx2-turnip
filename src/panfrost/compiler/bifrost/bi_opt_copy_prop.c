@@ -301,7 +301,7 @@ byte_chase_instr_srcs(bi_context *ctx, bi_instr *I, struct hash_table *ht)
       if (bi_is_null(repl))
          continue;
 
-      if (!bi_op_supports_swizzle(I->op, s, repl.swizzle, ctx->arch))
+      if (!bi_instr_supports_swizzle(I, s, repl.swizzle, ctx->arch))
          continue;
 
       if (bi_is_staging_src(I, s) && repl.type != BI_INDEX_NORMAL)

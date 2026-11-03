@@ -1640,6 +1640,8 @@ bool bi_can_replace_with_csel(bi_instr *I);
 void bi_calc_dominance(bi_context *ctx);
 bool bi_block_dominates(bi_block *parent, bi_block *child);
 
+bool bi_instr_supports_swizzle(const bi_instr *ins, unsigned src,
+                               enum bi_swizzle swizzle, unsigned arch);
 void bi_print_instr(const bi_instr *I, FILE *fp);
 void bi_print_instr_impl(const bi_instr *I, FILE *fp);
 void bi_print_slots(bi_registers *regs, FILE *fp);
