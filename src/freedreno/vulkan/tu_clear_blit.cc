@@ -13,6 +13,7 @@
 #include "util/format_rgb9e5.h"
 #include "util/format_srgb.h"
 #include "util/half_float.h"
+#include "util/os_misc.h"
 
 #include "common/freedreno_gpu_event.h"
 #include "common/freedreno_lrz.h"
@@ -5290,6 +5291,28 @@ tu_CmdClearAttachments(VkCommandBuffer commandBuffer,
 }
 TU_GENX(tu_CmdClearAttachments);
 
+/* ARMSX2 measurement aid, temporary: TU_SPAN_ZCLEAR picks how a sysmem
+ * depth load-op clear is emitted on a6xx.
+ *   0  2D engine, FMT6_32_FLOAT with the FLOAT32 internal format (as before)
+ *   1  a 3D draw through the depth unit, after the subpass's depth state
+ *   2  when the D32 value is 0.0 and the plane is UBWC: write zeros into the
+ *      UBWC flag buffer instead of the pixels; otherwise as 0
+ *   3  2D engine into FMT6_32_FLOAT with the UNORM8 internal format; only
+ *      0.0 and 1.0 can come out exact, measurement only
+ *   4  2D engine writing the float's four bytes as RGBA8 into the UBWC
+ *      plane; the UBWC classes differ, measurement only
+ */
+static int
+tu_span_zclear_mode(void)
+{
+   static int mode = -1;
+   if (mode < 0) {
+      const char *s = os_get_option("TU_SPAN_ZCLEAR");
+      mode = s ? atoi(s) : 0;
+   }
+   return mode;
+}
+
 template <chip CHIP>
 static void
 clear_sysmem_attachment(struct tu_cmd_buffer *cmd,
@@ -5320,6 +5343,61 @@ clear_sysmem_attachment(struct tu_cmd_buffer *cmd,
    bool separate_stencil = separate_ds && vk_format == VK_FORMAT_S8_UINT;
    const struct fdl6_view *fdl_view = tu_image_view_fdl_view(iview, separate_stencil);
 
+   const int zmode = format == PIPE_FORMAT_Z32_FLOAT && ops == &r2d_ops<CHIP>
+                        ? tu_span_zclear_mode() : 0;
+
+   if (zmode == 2 && fdl_view->ubwc_enabled &&
+       tu_pack_float32_for_d32(value->depthStencil.depth) == 0 &&
+       !cmd->state.per_layer_render_area &&
+       cmd->state.render_areas[0].offset.x == 0 &&
+       cmd->state.render_areas[0].offset.y == 0 &&
+       cmd->state.render_areas[0].extent.width >= iview->vk.extent.width &&
+       cmd->state.render_areas[0].extent.height >= iview->vk.extent.height) {
+      const struct fdl_layout *layout = &iview->image->layout[0];
+      const uint32_t size = layout->ubwc_slices[iview->vk.base_mip_level].size0;
+      const uint32_t pitch = 4096;
+      const VkClearValue zero = {};
+      ops->setup(cmd, cs, PIPE_FORMAT_R32_UINT, PIPE_FORMAT_R32_UINT,
+                 VK_IMAGE_ASPECT_COLOR_BIT, 0, true, false,
+                 VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_1_BIT);
+      ops->coords(cmd, cs, (VkOffset2D) {}, blt_no_coord,
+                  (VkExtent2D) { pitch / 4, size / pitch });
+      ops->clear_value(cmd, cs, PIPE_FORMAT_R32_UINT, &zero);
+      for_each_layer(i, clear_views, fb->layers) {
+         r2d_dst_buffer(cs, PIPE_FORMAT_R32_UINT,
+                        fdl_view->ubwc_addr + (uint64_t) i * fdl_view->ubwc_layer_size,
+                        pitch, PIPE_FORMAT_R32_UINT);
+         ops->run(cmd, cs);
+      }
+      ops->teardown(cmd, cs);
+      trace_end_sysmem_clear(&cmd->rp_trace, cs);
+      return;
+   }
+
+   if (zmode == 4) {
+      const uint32_t bits = tu_pack_float32_for_d32(value->depthStencil.depth);
+      VkClearValue bytes = {};
+      for (unsigned c = 0; c < 4; c++)
+         bytes.color.float32[c] = (float) ((bits >> (8 * c)) & 0xff) / 255.0f;
+      ops->setup(cmd, cs, PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R8G8B8A8_UNORM,
+                 VK_IMAGE_ASPECT_COLOR_BIT, 0, true, fdl_view->ubwc_enabled,
+                 VK_SAMPLE_COUNT_1_BIT, VK_SAMPLE_COUNT_1_BIT);
+      ops->coords(cmd, cs, cmd->state.render_areas[0].offset, (VkOffset2D) {},
+                  cmd->state.render_areas[0].extent);
+      ops->clear_value(cmd, cs, PIPE_FORMAT_R8G8B8A8_UNORM, &bytes);
+      for_each_layer(i, clear_views, fb->layers) {
+         struct fdl6_view view = *fdl_view;
+         view.RB_A2D_DEST_BUFFER_INFO =
+            pkt_field_set(A6XX_RB_A2D_DEST_BUFFER_INFO_COLOR_FORMAT,
+                          view.RB_A2D_DEST_BUFFER_INFO, FMT6_8_8_8_8_UNORM);
+         ops->dst(cs, &view, i, PIPE_FORMAT_R8G8B8A8_UNORM);
+         ops->run(cmd, cs);
+      }
+      ops->teardown(cmd, cs);
+      trace_end_sysmem_clear(&cmd->rp_trace, cs);
+      return;
+   }
+
    ops->setup(cmd, cs, format, format, clear_mask, 0, true, fdl_view->ubwc_enabled,
               cmd->state.pass->attachments[a].samples,
               cmd->state.pass->attachments[a].samples);
@@ -5328,7 +5406,25 @@ clear_sysmem_attachment(struct tu_cmd_buffer *cmd,
                   cmd->state.render_areas[0].extent);
    }
 
-   if (e5b9g9r9_as_u32) {
+   if (zmode == 3) {
+      tu_cs_emit_regs(cs, A6XX_RB_A2D_BLT_CNTL(
+         .solid_color = true,
+         .color_format = FMT6_32_FLOAT,
+         .mask = 0xf,
+         .ifmt = R2D_UNORM8,
+      ));
+      tu_cs_emit_regs(cs, GRAS_A2D_BLT_CNTL(CHIP,
+         .solid_color = true,
+         .color_format = FMT6_32_FLOAT,
+         .mask = 0xf,
+         .ifmt = R2D_UNORM8,
+      ));
+      const uint32_t cv[4] = {
+         tu_pack_float32_for_unorm(value->depthStencil.depth, 8), 0, 0, 0,
+      };
+      tu_cs_emit_pkt4(cs, REG_A6XX_RB_A2D_CLEAR_COLOR_DW0, 4);
+      tu_cs_emit_array(cs, cv, 4);
+   } else if (e5b9g9r9_as_u32) {
       ops->clear_value(cmd, cs, PIPE_FORMAT_R9G9B9E5_FLOAT, value);
    } else {
       ops->clear_value(cmd, cs, format, value);
@@ -5356,6 +5452,56 @@ clear_sysmem_attachment(struct tu_cmd_buffer *cmd,
 
    trace_end_sysmem_clear(&cmd->rp_trace, cs);
 }
+
+/* Whether the sysmem load-op clear of attachment a goes through the 3D path
+ * (tu_clear_sysmem_ds_attachment) instead of tu_clear_sysmem_attachment.
+ */
+bool
+tu_clear_sysmem_ds_uses_3d(const struct tu_cmd_buffer *cmd, uint32_t a)
+{
+   const struct tu_render_pass_attachment *att = &cmd->state.pass->attachments[a];
+   const struct tu_subpass *subpass = cmd->state.subpass;
+
+   return tu_span_zclear_mode() == 1 &&
+          vk_format_is_depth_or_stencil(att->format) &&
+          subpass->depth_stencil_attachment.attachment == a &&
+          !subpass->multiview_mask &&
+          !cmd->state.per_layer_render_area;
+}
+
+/* Sysmem load-op clear of the subpass's depth/stencil attachment as a 3D
+ * draw, the vkCmdClearAttachments path. Needs the subpass's depth buffer
+ * state (tu6_emit_zs) to have been emitted.
+ */
+template <chip CHIP>
+void
+tu_clear_sysmem_ds_attachment(struct tu_cmd_buffer *cmd, uint32_t a)
+{
+   const struct tu_render_pass_attachment *att = &cmd->state.pass->attachments[a];
+   const VkClearValue *value = &cmd->state.clear_values[a];
+   struct tu_cs *cs = &cmd->draw_cs;
+
+   VkClearAttachment clear = {
+      .aspectMask = att->clear_mask,
+      .clearValue = *value,
+   };
+   /* the value the 2D path would have written: denormals and -0.0 to 0.0 */
+   if (att->format == VK_FORMAT_D32_SFLOAT ||
+       att->format == VK_FORMAT_D32_SFLOAT_S8_UINT)
+      clear.clearValue.depthStencil.depth =
+         uif(tu_pack_float32_for_d32(value->depthStencil.depth));
+
+   const VkClearRect rect = {
+      .rect = cmd->state.render_areas[0],
+      .baseArrayLayer = 0,
+      .layerCount = cmd->state.framebuffer->layers,
+   };
+
+   trace_start_sysmem_clear(&cmd->rp_trace, cs, cmd, att->format, true, att->samples);
+   tu_clear_sysmem_attachments<CHIP>(cmd, 1, &clear, 1, &rect);
+   trace_end_sysmem_clear(&cmd->rp_trace, cs);
+}
+TU_GENX(tu_clear_sysmem_ds_attachment);
 
 template <chip CHIP>
 void

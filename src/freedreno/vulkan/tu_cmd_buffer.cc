@@ -6983,9 +6983,45 @@ tu_emit_subpass_begin_sysmem(struct tu_cmd_buffer *cmd)
 
    for (uint32_t i = 0; i < cmd->state.pass->attachment_count; ++i) {
       struct tu_render_pass_attachment *att = &cmd->state.pass->attachments[i];
-      if (att->clear_mask && att->first_subpass_idx == subpass_idx)
+      if (att->clear_mask && att->first_subpass_idx == subpass_idx &&
+          !tu_clear_sysmem_ds_uses_3d(cmd, i))
          tu_clear_sysmem_attachment<CHIP>(cmd, cs, i);
    }
+
+   if (!subpass->custom_resolve)
+      tu_cond_exec_end(cs); /* sysmem */
+}
+
+/* The subpass's depth/stencil load-op clear, as a draw: it runs after
+ * tu6_emit_zs because it renders into the depth buffer state.
+ */
+template <chip CHIP>
+static void
+tu_emit_subpass_ds_clear_sysmem(struct tu_cmd_buffer *cmd)
+{
+   if (cmd->device->physical_device->info->props.has_generic_clear)
+      return;
+
+   const struct tu_subpass *subpass = cmd->state.subpass;
+   const uint32_t a = subpass->depth_stencil_attachment.attachment;
+   if (a == VK_ATTACHMENT_UNUSED)
+      return;
+
+   const struct tu_render_pass_attachment *att = &cmd->state.pass->attachments[a];
+   const uint32_t subpass_idx = subpass - cmd->state.pass->subpasses;
+   if (!att->clear_mask || att->first_subpass_idx != subpass_idx ||
+       !tu_clear_sysmem_ds_uses_3d(cmd, a))
+      return;
+
+   struct tu_cs *cs = &cmd->draw_cs;
+
+   /* behaves like a draw, and the flush cannot sit inside the cond_exec */
+   tu_emit_cache_flush_renderpass<CHIP>(cmd);
+
+   if (!subpass->custom_resolve)
+      tu_cond_exec_start(cs, CP_COND_EXEC_0_RENDER_MODE_SYSMEM);
+
+   tu_clear_sysmem_ds_attachment<CHIP>(cmd, a);
 
    if (!subpass->custom_resolve)
       tu_cond_exec_end(cs); /* sysmem */
@@ -7182,6 +7218,7 @@ tu_emit_subpass_begin(struct tu_cmd_buffer *cmd)
    tu6_emit_zs<CHIP>(cmd, cmd->state.subpass, &cmd->draw_cs);
    tu6_emit_mrt<CHIP>(cmd, cmd->state.subpass, &cmd->draw_cs);
    tu6_emit_render_cntl<CHIP>(cmd, cmd->state.subpass, &cmd->draw_cs, false);
+   tu_emit_subpass_ds_clear_sysmem<CHIP>(cmd);
 
    if (CHIP >= A7XX) {
       tu7_emit_subpass_shading_rate<CHIP>(cmd, cmd->state.subpass, &cmd->draw_cs);
