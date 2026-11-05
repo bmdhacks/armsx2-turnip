@@ -284,6 +284,16 @@ struct fd_dev_info {
        */
       bool has_coherent_ubwc_flag_caches;
 
+      /* ARMSX2: an image created with VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT
+       * is not compressed. On the Adreno 613 a draw that reads its own UBWC
+       * colour attachment in a declared feedback loop reads stale data with
+       * the prim mode the ARMSX2 a6xx change emits (replays differ from run to
+       * run, and stop differing with TU_DEBUG=noubwc), while the stock prim
+       * mode that avoids it costs far more than leaving those images
+       * uncompressed.
+       */
+      bool feedback_loop_images_skip_ubwc;
+
       bool has_attachment_shading_rate;
 
       /* Whether mipmaps below certain threshold can use LINEAR tiling when higher
