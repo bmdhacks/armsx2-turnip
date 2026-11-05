@@ -5444,6 +5444,13 @@ clear_sysmem_attachment(struct tu_cmd_buffer *cmd,
  * Only on the parts sysmem_ds_clear_avoids_2d names: the draw costs more to
  * record than the 2D clear, which matters to a title that clears depth in
  * thousands of passes a frame.
+ *
+ * Only a clear that includes depth (single-aspect depth formats record theirs
+ * as COLOR). A stencil-only clear writes the S8 plane, which is not the slow
+ * FLOAT32 case, and a title can issue one per pass in a pass storm: on
+ * ARMSX2's Stuntman copy road, 1,067 a frame as draws cost 13 M more CPU
+ * instructions a frame (the draws, and the command-stream memory they need)
+ * against 2.4 ms of GPU saved.
  */
 bool
 tu_clear_sysmem_ds_uses_3d(const struct tu_cmd_buffer *cmd, uint32_t a)
@@ -5452,6 +5459,8 @@ tu_clear_sysmem_ds_uses_3d(const struct tu_cmd_buffer *cmd, uint32_t a)
    const struct tu_subpass *subpass = cmd->state.subpass;
 
    if (!cmd->device->physical_device->info->props.sysmem_ds_clear_avoids_2d)
+      return false;
+   if (!(att->clear_mask & (VK_IMAGE_ASPECT_COLOR_BIT | VK_IMAGE_ASPECT_DEPTH_BIT)))
       return false;
    if (att->format != VK_FORMAT_D16_UNORM &&
        att->format != VK_FORMAT_D32_SFLOAT &&
