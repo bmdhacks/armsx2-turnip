@@ -184,8 +184,6 @@ a6xx_gen1_low = GPUProps(
         gmem_ccu_color_cache_fraction = CCUColorCacheFraction.HALF.value,
         vs_max_inputs_count = 16,
         supports_double_threadsize = False,
-        # ARMSX2: measured on the Adreno 613 only (see freedreno_dev_info.h).
-        feedback_loop_images_skip_ubwc = True,
     )
 
 a6xx_gen1 = GPUProps(
