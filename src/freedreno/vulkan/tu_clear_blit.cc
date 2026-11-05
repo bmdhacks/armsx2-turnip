@@ -5304,6 +5304,8 @@ tu_clear_sysmem_depth_flags_eligible(const struct tu_cmd_buffer *cmd, uint32_t a
    const struct tu_image_view *iview = cmd->state.attachments[a];
    const VkRect2D *area = &cmd->state.render_areas[0];
 
+   if (!cmd->device->physical_device->info->props.sysmem_ds_clear_avoids_2d)
+      return false;
    if (att->format != VK_FORMAT_D32_SFLOAT &&
        att->format != VK_FORMAT_D32_SFLOAT_S8_UINT)
       return false;
@@ -5439,6 +5441,9 @@ clear_sysmem_attachment(struct tu_cmd_buffer *cmd,
  * RGBA8 rate. The draw needs a to be the subpass's depth/stencil
  * attachment, so that its depth buffer state is the one bound. A D32 value
  * the UBWC flag clear can do stays on the 2D side, which is cheaper still.
+ * Only on the parts sysmem_ds_clear_avoids_2d names: the draw costs more to
+ * record than the 2D clear, which matters to a title that clears depth in
+ * thousands of passes a frame.
  */
 bool
 tu_clear_sysmem_ds_uses_3d(const struct tu_cmd_buffer *cmd, uint32_t a)
@@ -5446,6 +5451,8 @@ tu_clear_sysmem_ds_uses_3d(const struct tu_cmd_buffer *cmd, uint32_t a)
    const struct tu_render_pass_attachment *att = &cmd->state.pass->attachments[a];
    const struct tu_subpass *subpass = cmd->state.subpass;
 
+   if (!cmd->device->physical_device->info->props.sysmem_ds_clear_avoids_2d)
+      return false;
    if (att->format != VK_FORMAT_D16_UNORM &&
        att->format != VK_FORMAT_D32_SFLOAT &&
        att->format != VK_FORMAT_D32_SFLOAT_S8_UINT)

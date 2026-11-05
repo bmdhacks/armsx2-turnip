@@ -284,6 +284,15 @@ struct fd_dev_info {
        */
       bool has_coherent_ubwc_flag_caches;
 
+      /* ARMSX2: the 2D engine clears D16, D32 and the depth plane of D32S8
+       * with the FLOAT32 internal format at one pixel per clock (measured on
+       * the Adreno 613, a quarter of its RGBA8 rate), so Turnip clears depth
+       * in sysmem through the UBWC flags or a 3D draw instead. Each such
+       * clear is a draw's worth of command recording, so it is kept to the
+       * parts where the 2D rate was measured.
+       */
+      bool sysmem_ds_clear_avoids_2d;
+
       bool has_attachment_shading_rate;
 
       /* Whether mipmaps below certain threshold can use LINEAR tiling when higher
