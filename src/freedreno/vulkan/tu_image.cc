@@ -592,6 +592,13 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
                       pCreateInfo->mipLevels, device->use_z24uint_s8uint))
       ubwc_enabled = false;
 
+   /* ARMSX2: on a6xx gen1-low an image that may be read in a feedback loop is
+    * not compressed; see feedback_loop_images_skip_ubwc.
+    */
+   if (device->physical_device->info->props.feedback_loop_images_skip_ubwc &&
+       (pCreateInfo->usage & VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT))
+      ubwc_enabled = false;
+
    /* Mutable images can be reinterpreted as any other compatible format.
     * This is a problem with UBWC (compression for different formats is different),
     * but also tiling ("swap" affects how tiled formats are stored in memory)
