@@ -2994,10 +2994,17 @@ vtn_handle_texture(struct vtn_builder *b, SpvOp opcode,
       vtn_push_sampled_image(b, w[2], si, access & ACCESS_NON_UNIFORM);
       return;
    } else if (opcode == SpvOpImage) {
+      struct vtn_value *sampled_val = vtn_untyped_value(b, w[3]);
       struct vtn_sampled_image si = vtn_get_sampled_image(b, w[3]);
 
+      /* The sampled image may be non-uniform without being decorated: an
+       * OpSampledImage of a decorated image or sampler is, and compilers
+       * leave the decoration on the loads, not on it (glslang does for
+       * texelFetch(sampler2D(tex[nonuniformEXT(i)], smp), ...)). The image
+       * it returns is no less non-uniform. The sampling instructions
+       * already take this from propagated_non_uniform. */
       enum gl_access_qualifier access = 0;
-      if (vtn_value_is_non_uniform(b, vtn_untyped_value(b, w[3])))
+      if (vtn_value_is_non_uniform(b, sampled_val) || sampled_val->propagated_non_uniform)
          access |= ACCESS_NON_UNIFORM;
 
       vtn_push_image(b, w[2], si.image, access & ACCESS_NON_UNIFORM);
