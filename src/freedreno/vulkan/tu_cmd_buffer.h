@@ -1042,6 +1042,18 @@ enum tu7_rb_shadow_slot {
    TU7_RB_SHADOW_CCU_CACHE_CNTL,
 };
 
+/* The register restore (shadow writes and the switch-back amble) is skipped on
+ * the Adreno 740 variant with KGSL chip id 0x43050a00 (Snapdragon G3x Gen 2,
+ * AYANEO Pocket S). With the restore that device is lost on the first GPU job;
+ * the same build boots with it skipped. Which of the two parts the chip cannot
+ * take is not known.
+ */
+static inline bool
+tu7_rb_restore_enabled(const struct tu_device *dev)
+{
+   return (dev->physical_device->dev_id.chip_id & 0xffffffff) != 0x43050a00;
+}
+
 /* Record the value about to be written to a shadowed register. It goes
  * before the register write, so that a switch between the two writes
  * restores the new value and the register write then repeats it. BR only:
@@ -1051,6 +1063,9 @@ static inline void
 tu7_rb_shadow_write(struct tu_cs *cs, enum tu7_rb_shadow_slot slot,
                     uint32_t value)
 {
+   if (!tu7_rb_restore_enabled(cs->device))
+      return;
+
    tu_cond_exec_start(cs, CP_COND_REG_EXEC_0_MODE(THREAD_MODE) |
                           CP_COND_REG_EXEC_0_BR);
    tu_cs_emit_pkt7(cs, CP_MEM_WRITE, 3);

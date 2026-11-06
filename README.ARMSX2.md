@@ -191,7 +191,9 @@ already rewrites these registers after a switch at the end of a tile, but on thi
 GPU that never happens, so its tile restore code never runs. The fix keeps a copy
 of the three registers in memory whenever Turnip writes them, and gives the GPU a
 small command list to run on every switch back that writes the copies into the
-registers. It applies to all Adreno 7xx. The copies are a few extra register-sized
+registers. It applies to all Adreno 7xx except the variant with KGSL chip id
+0x43050a00 (Snapdragon G3x Gen 2, AYANEO Pocket S), which loses the device on its
+first job with it. The copies are a few extra register-sized
 writes per render pass, and the restore itself runs only after a switch. Measured
 on a Retroid Pocket Duo with a GS dump replayed while a second, high-priority GLES
 program draws: GMEM arms differed from sysmem in 6 to 58 of 80 frames per run

@@ -2487,7 +2487,8 @@ tu_init_bin_preamble(struct tu_device *device)
       device->switch_away_amble_entry = tu_cs_end_sub_stream(&device->sub_cs, &preamble_cs);
    }
 
-   bool rb_regs = device->physical_device->info->chip == 7;
+   bool rb_regs = device->physical_device->info->chip == 7 &&
+                  tu7_rb_restore_enabled(device);
    const uint32_t rb_regs_size = 32;
 
    if (rb_regs) {
