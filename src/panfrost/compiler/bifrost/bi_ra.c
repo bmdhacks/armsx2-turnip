@@ -791,7 +791,10 @@ bi_spill_register(bi_context *ctx, bi_index index, uint32_t offset,
    assert(index.value < ctx->ssa_alloc);
    unsigned channels = ctx->reg_alignment[index.value] / 4;
    assert(channels > 0);
-   unsigned alignment = (ctx->arch >= 9) ? ctx->reg_alignment[index.value] : 4;
+   /* Natural alignment on Bifrost too: the Mali-G52 does not store a
+    * 128-bit TLS access at an offset that is only 4-byte aligned (0x48) as
+    * given, and the scalars spilled next to it read back clobbered. */
+   unsigned alignment = ctx->reg_alignment[index.value];
 
    /* first figure out the alignment we will need, based on the
     * maximum count we see
@@ -1297,6 +1300,8 @@ bi_register_allocate(bi_context *ctx)
             UNREACHABLE("Blend shaders may not spill");
 
          bi_spill_ssa(ctx, regs_to_use);
+         /* bi_lower_spill aligns its slots relative to this base. */
+         spill_count = ALIGN_POT(spill_count, 16);
          spill_count += bi_lower_spill(ctx, spill_count);
 
          /* By default, we use packed TLS addressing on Valhall.
