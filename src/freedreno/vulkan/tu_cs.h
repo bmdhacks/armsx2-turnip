@@ -71,10 +71,22 @@ struct tu_draw_state {
    bool writeable;
 };
 
+/* A stream that keeps BOs it is not using frees them after this many
+ * recordings in a row that did not need them.
+ */
+#define TU_CS_KEPT_BO_RECORDINGS 128
+
 struct tu_bo_array {
    struct tu_bo **bos;
+   /* BOs holding the current recording. */
    uint32_t bo_count;
+   /* BOs owned: the first bo_count in use, the rest kept from earlier
+    * recordings for tu_cs_add_bo() to hand out again.
+    */
+   uint32_t kept_count;
    uint32_t bo_capacity;
+   /* Recordings in a row that left kept BOs unused. */
+   uint32_t unused_recordings;
    uint32_t *start;
 };
 

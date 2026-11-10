@@ -93,12 +93,12 @@ tu_cs_init_suballoc(struct tu_cs *cs, struct tu_device *device,
 void
 tu_cs_finish(struct tu_cs *cs)
 {
-   for (uint32_t i = 0; i < cs->read_only.bo_count; ++i) {
+   for (uint32_t i = 0; i < cs->read_only.kept_count; ++i) {
       TU_RMV(resource_destroy, cs->device, cs->read_only.bos[i]);
       tu_bo_finish(cs->device, cs->read_only.bos[i]);
    }
 
-   for (uint32_t i = 0; i < cs->read_write.bo_count; ++i) {
+   for (uint32_t i = 0; i < cs->read_write.kept_count; ++i) {
       TU_RMV(resource_destroy, cs->device, cs->read_write.bos[i]);
       tu_bo_finish(cs->device, cs->read_write.bos[i]);
    }
@@ -168,8 +168,27 @@ tu_cs_add_bo(struct tu_cs *cs, uint32_t size)
 
    struct tu_bo_array *bos = cs->writeable ? &cs->read_write : &cs->read_only;
 
+   /* Take a BO kept by tu_cs_reset() if one is large enough. Its contents
+    * are stale, like those of the BO a reset stream starts in.
+    */
+   for (uint32_t i = bos->bo_count; i < bos->kept_count; ++i) {
+      struct tu_bo *kept_bo = bos->bos[i];
+      if (kept_bo->size < (uint64_t) size * sizeof(uint32_t))
+         continue;
+
+      bos->bos[i] = bos->bos[bos->bo_count];
+      bos->bos[bos->bo_count++] = kept_bo;
+
+      cs->start = cs->cur = cs->reserved_end =
+         static_cast<uint32_t *>(kept_bo->map);
+      cs->end = cs->start +
+                tu_sanitize_ib_size(kept_bo->size / sizeof(uint32_t));
+
+      return VK_SUCCESS;
+   }
+
    /* grow cs->bos if needed */
-   if (bos->bo_count == bos->bo_capacity) {
+   if (bos->kept_count == bos->bo_capacity) {
       uint32_t new_capacity = MAX2(4, 2 * bos->bo_capacity);
       struct tu_bo **new_bos = static_cast<struct tu_bo **>(
          realloc(bos->bos, new_capacity * sizeof(struct tu_bo *)));
@@ -201,6 +220,12 @@ tu_cs_add_bo(struct tu_cs *cs, uint32_t size)
 
    TU_RMV(cmd_buffer_bo_create, cs->device, new_bo);
 
+   /* The new BO goes after the ones in use; the kept BO in its place moves
+    * to the end.
+    */
+   if (bos->bo_count < bos->kept_count)
+      bos->bos[bos->kept_count] = bos->bos[bos->bo_count];
+   bos->kept_count++;
    bos->bos[bos->bo_count++] = new_bo;
 
    cs->start = cs->cur = cs->reserved_end = static_cast<uint32_t *>(new_bo->map);
@@ -542,6 +567,61 @@ tu_cs_reserve_space(struct tu_cs *cs, uint32_t reserved_size)
 }
 
 /**
+ * Make the BOs of one array of \a cs ready for the next recording. \a cur is
+ * where the array's next packet would have gone.
+ *
+ * The last BO the recording used is kept and comes first, as it always did:
+ * it is the largest while the stream is still growing. The others are kept
+ * too if tu_cs_add_bo() can hand them out again, that is if they are as large
+ * as the next BO the stream would ask for. A recording that needs more than
+ * one BO of the largest size then takes the rest back instead of allocating
+ * them, and taking the kernel's page faults on them, every time.
+ *
+ * Kept BOs that TU_CS_KEPT_BO_RECORDINGS recordings in a row did not reach
+ * are freed. A reset with nothing recorded is not counted.
+ */
+static void
+tu_cs_reset_bos(struct tu_cs *cs, struct tu_bo_array *bos, uint32_t *cur)
+{
+   if (!bos->bo_count)
+      return;
+
+   const bool recorded =
+      bos->bo_count > 1 || cur != static_cast<uint32_t *>(bos->bos[0]->map);
+   bool free_unused = false;
+
+   if (bos->bo_count == bos->kept_count) {
+      if (recorded)
+         bos->unused_recordings = 0;
+   } else if (recorded &&
+              ++bos->unused_recordings >= TU_CS_KEPT_BO_RECORDINGS) {
+      free_unused = true;
+      bos->unused_recordings = 0;
+   }
+
+   struct tu_bo *last = bos->bos[bos->bo_count - 1];
+   bos->bos[bos->bo_count - 1] = bos->bos[0];
+   bos->bos[0] = last;
+
+   const uint64_t next_size = (uint64_t) cs->next_bo_size * sizeof(uint32_t);
+   uint32_t kept_count = 1;
+   for (uint32_t i = 1; i < bos->kept_count; ++i) {
+      struct tu_bo *bo = bos->bos[i];
+      const bool unused = i >= bos->bo_count;
+
+      if (bo->size < next_size || (unused && free_unused)) {
+         TU_RMV(resource_destroy, cs->device, bo);
+         tu_bo_finish(cs->device, bo);
+      } else {
+         bos->bos[kept_count++] = bo;
+      }
+   }
+
+   bos->kept_count = kept_count;
+   bos->bo_count = 1;
+}
+
+/**
  * Reset a command stream to its initial state.  This discards all comand
  * packets in \a cs, but does not necessarily release all resources.
  */
@@ -557,33 +637,20 @@ tu_cs_reset(struct tu_cs *cs)
       return;
    }
 
-   for (uint32_t i = 0; i + 1 < cs->read_only.bo_count; ++i) {
-      TU_RMV(resource_destroy, cs->device, cs->read_only.bos[i]);
-      tu_bo_finish(cs->device, cs->read_only.bos[i]);
-   }
-
-   for (uint32_t i = 0; i + 1 < cs->read_write.bo_count; ++i) {
-      TU_RMV(resource_destroy, cs->device, cs->read_write.bos[i]);
-      tu_bo_finish(cs->device, cs->read_write.bos[i]);
-   }
-
    assert(!cs->writeable);
 
-   if (cs->read_only.bo_count) {
-      cs->read_only.bos[0] = cs->read_only.bos[cs->read_only.bo_count - 1];
-      cs->read_only.bo_count = 1;
+   /* cs->cur is the read-only array's while the stream is not writeable. */
+   tu_cs_reset_bos(cs, &cs->read_only, cs->cur);
+   tu_cs_reset_bos(cs, &cs->read_write, cs->read_write.start);
 
+   if (cs->read_only.bo_count) {
       cs->start = cs->cur = cs->reserved_end = static_cast<uint32_t *>(cs->read_only.bos[0]->map);
       cs->end = cs->start + tu_sanitize_ib_size(cs->read_only.bos[0]->size /
                                                 sizeof(uint32_t));
    }
 
-   if (cs->read_write.bo_count) {
-      cs->read_write.bos[0] = cs->read_write.bos[cs->read_write.bo_count - 1];
-      cs->read_write.bo_count = 1;
-
+   if (cs->read_write.bo_count)
       cs->read_write.start = static_cast<uint32_t *>(cs->read_write.bos[0]->map);
-   }
 
    cs->entry_count = 0;
 }
