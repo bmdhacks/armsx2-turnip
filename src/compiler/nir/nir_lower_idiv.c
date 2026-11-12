@@ -27,9 +27,46 @@
 #include "nir.h"
 #include "nir_builder.h"
 
+/* 32-bit unsigned division from the fp32 reciprocal and low multiplies
+ * (nir_lower_idiv_options::udiv_fp32_rcp). q0 = n * rcp(d) in fp32 is
+ * within ~2^-22 * q + 2^8 / d of n / d, so the remainder n - q0 * d fits a
+ * signed 32-bit value while d < 2^30; one more fp32 step leaves q off by at
+ * most one, which the last compare fixes. A divisor >= 2^30 gives a
+ * quotient of 0..3, found by subtracting it up to three times.
+ */
+static nir_def *
+emit_udiv_fp32_rcp(nir_builder *b, nir_def *n, nir_def *d, bool modulo, bool small_n)
+{
+   nir_def *rcp = nir_frcp(b, nir_u2f32(b, d));
+   /* Clamp below 2^32 so the conversion stays in range. */
+   nir_def *q = nir_f2u32(b, nir_fmin(b, nir_fmul(b, nir_u2f32(b, n), rcp),
+                                      nir_imm_float(b, 4294967040.0f)));
+   nir_def *r = nir_isub(b, n, nir_imul(b, q, d));
+   q = nir_iadd(b, q, nir_f2i32(b, nir_fmul(b, nir_i2f32(b, r), rcp)));
+   r = nir_isub(b, n, nir_imul(b, q, d));
+   nir_def *neg = nir_ilt_imm(b, r, 0);
+   q = nir_bcsel(b, neg, nir_iadd_imm(b, q, -1), q);
+   r = nir_bcsel(b, neg, nir_iadd(b, r, d), r);
+   nir_def *ge = nir_uge(b, r, d);
+   q = nir_bcsel(b, ge, nir_iadd_imm(b, q, 1), q);
+   r = nir_bcsel(b, ge, nir_isub(b, r, d), r);
+   /* n < 2^24: r stayed in range for every d. */
+   if (small_n)
+      return modulo ? r : q;
+
+   nir_def *m = n, *qs = nir_imm_int(b, 0);
+   for (unsigned k = 0; k < 3; k++) {
+      nir_def *g = nir_uge(b, m, d);
+      m = nir_bcsel(b, g, nir_isub(b, m, d), m);
+      qs = nir_iadd(b, qs, nir_b2i32(b, g));
+   }
+   nir_def *big = nir_uge_imm(b, d, 0x40000000u);
+   return modulo ? nir_bcsel(b, big, m, r) : nir_bcsel(b, big, qs, q);
+}
+
 /* ported from LLVM's AMDGPUTargetLowering::LowerUDIVREM */
 static nir_def *
-emit_udiv(nir_builder *bld, nir_def *numer, nir_def *denom, bool modulo)
+emit_udiv_precise(nir_builder *bld, nir_def *numer, nir_def *denom, bool modulo)
 {
    nir_def *rcp = nir_frcp(bld, nir_u2f32(bld, denom));
    rcp = nir_f2u32(bld, nir_fmul_imm(bld, rcp, 4294966784.0));
@@ -64,9 +101,19 @@ emit_udiv(nir_builder *bld, nir_def *numer, nir_def *denom, bool modulo)
    }
 }
 
+static nir_def *
+emit_udiv(nir_builder *bld, nir_def *numer, nir_def *denom, bool modulo,
+          const nir_lower_idiv_options *options, bool small_n)
+{
+   if (options && options->udiv_fp32_rcp)
+      return emit_udiv_fp32_rcp(bld, numer, denom, modulo, small_n);
+   return emit_udiv_precise(bld, numer, denom, modulo);
+}
+
 /* ported from LLVM's AMDGPUTargetLowering::LowerSDIVREM */
 static nir_def *
-emit_idiv(nir_builder *bld, nir_def *numer, nir_def *denom, nir_op op)
+emit_idiv(nir_builder *bld, nir_def *numer, nir_def *denom, nir_op op,
+          const nir_lower_idiv_options *options, bool small_n)
 {
    nir_def *lhs = nir_iabs(bld, numer);
    nir_def *rhs = nir_iabs(bld, denom);
@@ -76,13 +123,13 @@ emit_idiv(nir_builder *bld, nir_def *numer, nir_def *denom, nir_op op)
        * and since XOR is bitwise, that's the sign bit of the XOR.
        */
       nir_def *d_sign = nir_ilt_imm(bld, nir_ixor(bld, numer, denom), 0);
-      nir_def *res = emit_udiv(bld, lhs, rhs, false);
+      nir_def *res = emit_udiv(bld, lhs, rhs, false, options, small_n);
       return nir_bcsel(bld, d_sign, nir_ineg(bld, res), res);
    } else {
       nir_def *lh_sign = nir_ilt_imm(bld, numer, 0);
       nir_def *rh_sign = nir_ilt_imm(bld, denom, 0);
 
-      nir_def *res = emit_udiv(bld, lhs, rhs, true);
+      nir_def *res = emit_udiv(bld, lhs, rhs, true, options, small_n);
       res = nir_bcsel(bld, lh_sign, nir_ineg(bld, res), res);
       if (op == nir_op_imod) {
          nir_def *cond = nir_ieq_imm(bld, res, 0);
@@ -133,11 +180,35 @@ convert_instr_small(nir_builder *b, nir_op op,
    return res;
 }
 
+struct lower_idiv_state {
+   const nir_lower_idiv_options *options;
+   struct hash_table *range_ht;
+};
+
+/* Is every component of the numerator provably below 2^24 (and so also
+ * non-negative)? Only asked for udiv_fp32_rcp. */
+static bool
+numer_below_2_24(nir_builder *b, nir_alu_instr *alu, struct lower_idiv_state *st)
+{
+   if (!st->options || !st->options->udiv_fp32_rcp || alu->def.bit_size != 32)
+      return false;
+   if (!st->range_ht)
+      st->range_ht = _mesa_pointer_hash_table_create(NULL);
+   for (unsigned c = 0; c < alu->def.num_components; c++) {
+      nir_scalar s = nir_get_scalar(alu->src[0].src.ssa, alu->src[0].swizzle[c]);
+      if (nir_unsigned_upper_bound(b->shader, st->range_ht, s) >= (1u << 24))
+         return false;
+   }
+   return true;
+}
+
 static nir_def *
 lower_idiv(nir_builder *b, nir_instr *instr, void *_data)
 {
-   const nir_lower_idiv_options *options = _data;
+   struct lower_idiv_state *st = _data;
+   const nir_lower_idiv_options *options = st->options;
    nir_alu_instr *alu = nir_instr_as_alu(instr);
+   const bool small_n = numer_below_2_24(b, alu, st);
 
    nir_def *numer = nir_ssa_for_alu_src(b, alu, 0);
    nir_def *denom = nir_ssa_for_alu_src(b, alu, 1);
@@ -147,9 +218,9 @@ lower_idiv(nir_builder *b, nir_instr *instr, void *_data)
    if (numer->bit_size < 32)
       return convert_instr_small(b, alu->op, numer, denom, options);
    else if (alu->op == nir_op_udiv || alu->op == nir_op_umod)
-      return emit_udiv(b, numer, denom, alu->op == nir_op_umod);
+      return emit_udiv(b, numer, denom, alu->op == nir_op_umod, options, small_n);
    else
-      return emit_idiv(b, numer, denom, alu->op);
+      return emit_idiv(b, numer, denom, alu->op, options, small_n);
 }
 
 static bool
@@ -178,8 +249,12 @@ inst_is_idiv(const nir_instr *instr, UNUSED const void *_state)
 bool
 nir_lower_idiv(nir_shader *shader, const nir_lower_idiv_options *options)
 {
-   return nir_shader_lower_instructions(shader,
-                                        inst_is_idiv,
-                                        lower_idiv,
-                                        (void *)options);
+   struct lower_idiv_state st = {.options = options};
+   bool progress = nir_shader_lower_instructions(shader,
+                                                 inst_is_idiv,
+                                                 lower_idiv,
+                                                 &st);
+   if (st.range_ht)
+      _mesa_hash_table_destroy(st.range_ht, NULL);
+   return progress;
 }
