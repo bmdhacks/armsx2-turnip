@@ -6738,6 +6738,11 @@ typedef struct nir_lower_idiv_options {
     * division lowering
     */
    bool allow_fp16;
+   /* 32-bit division from the fp32 reciprocal with low multiplies only, for
+    * hardware without a high multiply (where umul_high is expensive).
+    * Exact; needs frcp within a few ulp and f2u32 that saturates.
+    */
+   bool udiv_fp32_rcp;
 } nir_lower_idiv_options;
 
 bool nir_lower_idiv(nir_shader *shader, const nir_lower_idiv_options *options);
