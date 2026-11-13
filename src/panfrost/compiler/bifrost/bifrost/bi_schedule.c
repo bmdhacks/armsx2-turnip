@@ -1061,6 +1061,19 @@ bi_instr_ftz(bi_context *ctx, bi_instr *I)
        I->ftz)
       return BI_FTZ_STATE_ENABLE;
 
+   unsigned execution_mode = ctx->nir->info.float_controls_execution_mode;
+
+   /* The f16<->f32 conversions flush (or keep) the denormals of their fp16
+    * side, so they follow the fp16 mode. They are not is_float ops. */
+   if (I->op == BI_OPCODE_F16_TO_F32 || I->op == BI_OPCODE_V2F32_TO_V2F16) {
+      if (nir_is_denorm_flush_to_zero(execution_mode, 16))
+         return BI_FTZ_STATE_ENABLE;
+      else if (nir_is_denorm_preserve(execution_mode, 16))
+         return BI_FTZ_STATE_DISABLE;
+      else
+         return BI_FTZ_STATE_NONE;
+   }
+
    struct bi_op_props props = bi_opcode_props[I->op];
    if (!props.is_float)
       return BI_FTZ_STATE_NONE;
@@ -1074,7 +1087,6 @@ bi_instr_ftz(bi_context *ctx, bi_instr *I)
    else
       return BI_FTZ_STATE_NONE;
 
-   unsigned execution_mode = ctx->nir->info.float_controls_execution_mode;
    if (nir_is_denorm_flush_to_zero(execution_mode, bitsize))
       return BI_FTZ_STATE_ENABLE;
    else if (nir_is_denorm_preserve(execution_mode, bitsize))
