@@ -113,6 +113,11 @@ const struct pan_blendable_format
       BFMT(B5G5R5A1_UNORM, R5G5B5A1),
       BFMT(R5G5B5A1_UNORM, R5G5B5A1),
       BFMT(B5G5R5X1_UNORM, R5G5B5A1),
+#if PAN_ARCH == 7
+      /* Milestone 11 B5: alpha in bit 0 (VK R5G5B5A1/B5G5R5A1_UNORM_PACK16). */
+      BFMT2(A1B5G5R5_UNORM, R5G5B5A1, A1B5G5R5, 0),
+      BFMT2(A1R5G5B5_UNORM, R5G5B5A1, A1B5G5R5, 0),
+#endif
 
 #if PAN_ARCH >= 9
       BFMT_FLOAT(R16_FLOAT, R16F),
@@ -137,6 +142,7 @@ const struct pan_blendable_format
 #define FLAGS_VTR___ (_V | _T | _R)
 #define FLAGS_VTR_IB (_V | _T | _R | _I | _B)
 #define FLAGS_VT____ (_V | _T)
+#define FLAGS__TR___ (_T | _R)
 #define FLAGS_VT__IB (_V | _T | _I | _B)
 #define FLAGS__T_Z__ (_T | _Z)
 #define FLAGS_____I_ (_I)
@@ -332,6 +338,11 @@ const struct pan_format GENX(pan_pipe_format)[PIPE_FORMAT_COUNT] = {
    FMT(B5G6R5_UNORM,            RGB565,          BGR1, L, VTR_IB),
    FMT(R5G5B5X1_UNORM,          RGB5_A1_UNORM,   RGB1, L, VT__IB),
    FMT(B5G5R5X1_UNORM,          RGB5_A1_UNORM,   BGR1, L, VT__IB),
+#if PAN_ARCH == 7
+   /* Milestone 11 B5: alpha in bit 0, then B, G, R. */
+   FMT(A1B5G5R5_UNORM,          A1_BGR5_UNORM,   RGBA, L, _TR___),
+   FMT(A1R5G5B5_UNORM,          A1_BGR5_UNORM,   BGRA, L, _TR___),
+#endif
    FMT(R5G5B5A1_UNORM,          RGB5_A1_UNORM,   RGBA, L, VTR_IB),
    FMT(B5G5R5A1_UNORM,          RGB5_A1_UNORM,   BGRA, L, VTR_IB),
    FMT(R10G10B10X2_UNORM,       RGB10_A2_UNORM,  RGB1, L, VTR_IB),
@@ -439,7 +450,11 @@ const struct pan_format GENX(pan_pipe_format)[PIPE_FORMAT_COUNT] = {
    FMT(R8G8_UINT,               RG8UI,           RG01, L, VTR_IB),
    FMT(R16G16_UINT,             RG16UI,          RG01, L, VTR_IB),
    FMT(R32G32_UINT,             RG32UI,          RG01, L, VTR_IB),
+#if PAN_ARCH == 7
+   FMT(R8G8B8_UINT,             RGB8UI,          RGB1, L, VT____),
+#else
    FMT(R8G8B8_UINT,             RGB8UI,          RGB1, L, V_____),
+#endif
    FMT(R32G32B32_UINT,          RGB32UI,         RGB1, L, VTR_IB),
    FMT(R8G8B8A8_UINT,           RGBA8UI,         RGBA, L, VTR_IB),
    FMT(R16G16B16A16_UINT,       RGBA16UI,        RGBA, L, VTR_IB),
@@ -488,13 +503,33 @@ const struct pan_format GENX(pan_pipe_format)[PIPE_FORMAT_COUNT] = {
 #endif
 
    /* Don't allow render/texture for 48-bit  */
+#if PAN_ARCH == 7
+   FMT(R16G16B16_UNORM,         RGB16_UNORM,     RGB1, L, VT____),
+#else
    FMT(R16G16B16_UNORM,         RGB16_UNORM,     RGB1, L, V_____),
+#endif
+#if PAN_ARCH == 7
+   FMT(R16G16B16_SINT,          RGB16I,          RGB1, L, VT____),
+#else
    FMT(R16G16B16_SINT,          RGB16I,          RGB1, L, V_____),
+#endif
+#if PAN_ARCH == 7
+   FMT(R16G16B16_FLOAT,         RGB16F,          RGB1, L, VT____),
+#else
    FMT(R16G16B16_FLOAT,         RGB16F,          RGB1, L, V_____),
+#endif
    FMT(R16G16B16_USCALED,       RGB16UI,         RGB1, L, V_____),
    FMT(R16G16B16_SSCALED,       RGB16I,          RGB1, L, V_____),
+#if PAN_ARCH == 7
+   FMT(R16G16B16_SNORM,         RGB16_SNORM,     RGB1, L, VT____),
+#else
    FMT(R16G16B16_SNORM,         RGB16_SNORM,     RGB1, L, V_____),
+#endif
+#if PAN_ARCH == 7
+   FMT(R16G16B16_UINT,          RGB16UI,         RGB1, L, VT____),
+#else
    FMT(R16G16B16_UINT,          RGB16UI,         RGB1, L, V_____),
+#endif
    FMT(R4G4B4A4_UNORM,          RGBA4_UNORM,     RGBA, L, VTR___),
    FMT(B4G4R4A4_UNORM,          RGBA4_UNORM,     BGRA, L, VTR___),
    FMT(A4R4G4B4_UNORM,          RGBA4_UNORM,     ARGB, L, VTR___),
@@ -545,7 +580,11 @@ const struct pan_format GENX(pan_pipe_format)[PIPE_FORMAT_COUNT] = {
    FMT(R16G16_SINT,             RG16I,           RG01, L, VTR_IB),
    FMT(R32G32_SINT,             RG32I,           RG01, L, VTR_IB),
    FMT(R16G16_FLOAT,            RG16F,           RG01, L, VTR_IB),
+#if PAN_ARCH == 7
+   FMT(R8G8B8_SINT,             RGB8I,           RGB1, L, VT____),
+#else
    FMT(R8G8B8_SINT,             RGB8I,           RGB1, L, V_____),
+#endif
    FMT(R32G32B32_SINT,          RGB32I,          RGB1, L, VTR_IB),
    FMT(R8G8B8A8_SINT,           RGBA8I,          RGBA, L, VTR_IB),
    FMT(R16G16B16A16_SINT,       RGBA16I,         RGBA, L, VTR_IB),
