@@ -19,6 +19,18 @@
 #include "compiler.h"
 #include "../kraid/kraid.h"
 
+/* Bifrost's 64-bit ATOM_C arithmetic gives wrong results or faults; 64-bit
+ * exchange and compare-exchange (AXCHG.i64, ACMPXCHG.i64) work. Everything
+ * else is native. */
+static bool
+bi_atomic_native(const nir_instr *instr, const void *data)
+{
+   const nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   const nir_atomic_op op = nir_intrinsic_atomic_op(intr);
+   return intr->def.bit_size != 64 || op == nir_atomic_op_xchg ||
+          op == nir_atomic_op_cmpxchg;
+}
+
 static bool
 bi_use_kraid(nir_shader *nir, unsigned arch)
 {
@@ -998,6 +1010,11 @@ bifrost_postprocess_nir(nir_shader *nir,
       .native_offset = gpu_arch >= 9,
    };
    NIR_PASS(_, nir, nir_lower_ssbo, &ssbo_opts);
+
+   /* 64-bit atomic arithmetic as compare-exchange loops on Bifrost; before
+    * nir_lower_int64, which lowers the loop's 64-bit ALU. */
+   if (gpu_arch <= 8)
+      NIR_PASS(_, nir, nir_lower_atomics, bi_atomic_native);
 
    /*
     * Lower subgroups ops before lowering int64: nir_lower_int64 doesn't know
