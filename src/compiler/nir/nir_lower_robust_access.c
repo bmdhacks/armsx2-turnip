@@ -33,6 +33,10 @@ image_robust2_oob_value(nir_builder *b, nir_intrinsic_instr *instr)
    else
       one = nir_imm_intN_t(b, 1, bit_size);
 
+   /* No format qualifier: nothing says which components are missing. */
+   if (format == PIPE_FORMAT_NONE)
+      return nir_imm_zero(b, num_components, bit_size);
+
    const struct util_format_description *desc = util_format_description(format);
    nir_def *components[NIR_MAX_VEC_COMPONENTS];
    for (unsigned i = 0; i < num_components; i++)
