@@ -376,6 +376,22 @@ bi_mark_interference(bi_block *block, struct lcra_state *l, uint8_t *live,
          }
       }
 
+      /* Bifrost (v7): LD_VAR must not write its staging registers over its
+       * own sources. A sample-mode load whose result took the register of
+       * its sample index read the wrong varying (CTS
+       * multisample_interpolation.nonuniform_interpolant_indexing.sample,
+       * Mali-G31).
+       */
+      if (arch < 9 && (ins->op == BI_OPCODE_LD_VAR || ins->op == BI_OPCODE_LD_VAR_IMM)) {
+         bi_foreach_dest(ins, d) {
+            bi_foreach_ssa_src(ins, s) {
+               lcra_add_node_interference(l, ins->dest[d].value, bi_writemask(ins, d),
+                                          ins->src[s].value,
+                                          BITFIELD_MASK(bi_count_read_registers(ins, s)) << ins->src[s].offset);
+            }
+         }
+      }
+
       /* MMUL must not write its result into a multiply operand, but the
        * accumulator (src2) may be reused.
        */
