@@ -15,6 +15,7 @@
 #include "panfrost/model/pan_model.h"
 #include "valhall/valhall.h"
 #include "bi_debug.h"
+#include "bi_quirks.h"
 #include "bifrost_compile.h"
 #include "bifrost_nir.h"
 #include "compiler.h"
@@ -446,7 +447,8 @@ bifrost_preprocess_nir(nir_shader *nir, unsigned arch)
 static bool
 bi_lower_subgroups(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
-   unsigned int arch = *(unsigned *)data;
+   /* The subgroup size (bifrost_subgroup_size), not the arch. */
+   const unsigned subgroup_size = *(unsigned *)data;
 
    b->cursor = nir_before_instr(&intr->instr);
 
@@ -478,16 +480,15 @@ bi_lower_subgroups(nir_builder *b, nir_intrinsic_instr *intr, void *data)
        * nir_udiv_imm with a power of two divisor, which pan_subgroup_size is,
        * will construct a right shift instead of an udiv.
        */
-      val = nir_udiv_imm(b, flat_local_id, pan_subgroup_size(arch));
+      val = nir_udiv_imm(b, flat_local_id, subgroup_size);
       break;
    }
 
    case nir_intrinsic_load_subgroup_size:
-      val = nir_imm_int(b, pan_subgroup_size(arch));
+      val = nir_imm_int(b, subgroup_size);
       break;
 
    case nir_intrinsic_load_num_subgroups: {
-      unsigned subgroup_size = pan_subgroup_size(arch);
       nir_def *local_size = nir_load_workgroup_size(b);
       /* workgroup_size.x * workgroup_size.y * workgroup_size.z */
       nir_def *workgroup_size =
@@ -1022,8 +1023,9 @@ bifrost_postprocess_nir(nir_shader *nir,
     * we can implement reductions and scans on f16vec2 values without splitting
     * to scalar first.
     */
+   const unsigned subgroup_size = bifrost_subgroup_size(gpu_arch, inputs->model);
    const nir_lower_subgroups_options lower_subgroup_opts = {
-      .subgroup_size = pan_subgroup_size(gpu_arch),
+      .subgroup_size = subgroup_size,
       .ballot_bit_size = 32,
       .ballot_components = 1,
       .lower_to_scalar = true,
@@ -1054,7 +1056,7 @@ bifrost_postprocess_nir(nir_shader *nir,
       NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, bi_lower_subgroups,
-            nir_metadata_control_flow, (void *) &gpu_arch);
+            nir_metadata_control_flow, (void *) &subgroup_size);
 
    /* Lower constant idiv before we lower 64-bit integers */
    NIR_PASS(_, nir, nir_opt_idiv_const, 8);
