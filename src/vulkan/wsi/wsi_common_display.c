@@ -486,6 +486,7 @@ find_connector_properties(struct wsi_display_connector *connector, drmModeConnec
 enum wsi_image_state {
    WSI_IMAGE_IDLE,
    WSI_IMAGE_DRAWING,
+   WSI_IMAGE_GPU_WAIT,
    WSI_IMAGE_WAITING,
    WSI_IMAGE_QUEUED_AFTER_WAIT,
    WSI_IMAGE_QUEUED,
@@ -526,6 +527,15 @@ struct wsi_display_swapchain {
    uint64_t                        last_presented_vblank;
    uint64_t                        last_presented_nsec;
 
+   /* A swapchain that can't fence flips through IN_FENCE_FD: without implicit
+    * sync, a flip would otherwise show a frame the GPU hasn't finished. Images
+    * wait on this thread, so the caller of vkQueuePresentKHR doesn't.
+    */
+   bool                            gpu_wait;
+   bool                            gpu_wait_stop;
+   pthread_t                       gpu_wait_thread;
+   struct u_cnd_monotonic          gpu_wait_cond;
+
    struct wsi_display_image        images[0];
 };
 
@@ -551,6 +561,9 @@ static uint64_t fence_sequence;
 
 static void
 _wsi_display_cleanup_state(struct wsi_display_swapchain *chain);
+
+static int
+wsi_display_wait_for_event(struct wsi_display *wsi, uint64_t timeout_ns);
 
 ICD_DEFINE_NONDISP_HANDLE_CASTS(wsi_display_mode, VkDisplayModeKHR)
 ICD_DEFINE_NONDISP_HANDLE_CASTS(wsi_display_connector, VkDisplayKHR)
@@ -1907,6 +1920,17 @@ wsi_display_drop_master(struct wsi_display *wsi)
    return 0;
 }
 
+static bool
+wsi_display_flips_pending(const struct wsi_display_swapchain *chain)
+{
+   for (uint32_t i = 0; i < chain->base.image_count; i++) {
+      if (chain->images[i].state == WSI_IMAGE_FLIPPING ||
+          chain->images[i].state == WSI_IMAGE_QUEUED)
+         return true;
+   }
+   return false;
+}
+
 static VkResult
 wsi_display_swapchain_destroy(struct wsi_swapchain *drv_chain,
                               const VkAllocationCallbacks *allocator)
@@ -1915,10 +1939,37 @@ wsi_display_swapchain_destroy(struct wsi_swapchain *drv_chain,
       (struct wsi_display_swapchain *) drv_chain;
    struct wsi_display *wsi = chain->wsi;
 
+   if (chain->gpu_wait) {
+      mtx_lock(&wsi->wait_mutex);
+      chain->gpu_wait_stop = true;
+      u_cnd_monotonic_signal(&chain->gpu_wait_cond);
+      mtx_unlock(&wsi->wait_mutex);
+      pthread_join(chain->gpu_wait_thread, NULL);
+      u_cnd_monotonic_destroy(&chain->gpu_wait_cond);
+   }
+
+   /* A flip's event names its image, and the wait thread reads that image when
+    * the event comes: let the flips finish before the images are freed. They end
+    * within a refresh or two; the limit is for an event that never comes.
+    */
+   mtx_lock(&wsi->wait_mutex);
+   const uint64_t flips_limit = wsi_rel_to_abs_time(1000000000ull);
+   while (wsi_display_flips_pending(chain)) {
+      if (wsi_display_wait_for_event(wsi, flips_limit))
+         break;
+   }
+   mtx_unlock(&wsi->wait_mutex);
+
    _wsi_display_cleanup_state(chain);
 
    for (uint32_t i = 0; i < chain->base.image_count; i++)
       wsi_display_image_finish(drv_chain, &chain->images[i]);
+
+   /* Removing a framebuffer that is on screen makes the kernel turn the CRTC
+    * off (drmModeRmFB). The next commit must be a modeset: without one it
+    * succeeds, and its flip event never comes.
+    */
+   wsi_display_mode_from_handle(chain->surface->displayMode)->connector->active = false;
 
    mtx_destroy(&chain->present_id_mutex);
    u_cnd_monotonic_destroy(&chain->present_id_cond);
@@ -3318,6 +3369,55 @@ wsi_display_poll_refresh_duration(struct wsi_swapchain *drv_chain, uint64_t *int
    return refresh_ns;
 }
 
+/* Hands each presented image to the flip queue, oldest first, once its GPU work
+ * is done.
+ */
+static void *
+wsi_display_gpu_wait_thread(void *data)
+{
+   struct wsi_display_swapchain *chain = data;
+   struct wsi_display *wsi = chain->wsi;
+
+   mtx_lock(&wsi->wait_mutex);
+   for (;;) {
+      struct wsi_display_image *image = NULL;
+      for (uint32_t i = 0; i < chain->base.image_count; i++) {
+         struct wsi_display_image *tmp_image = &chain->images[i];
+         if (tmp_image->state == WSI_IMAGE_GPU_WAIT &&
+             (!image || tmp_image->flip_sequence < image->flip_sequence))
+            image = tmp_image;
+      }
+      if (!image) {
+         if (chain->gpu_wait_stop)
+            break;
+         u_cnd_monotonic_wait(&chain->gpu_wait_cond, &wsi->wait_mutex);
+         continue;
+      }
+
+      const uint32_t index = image - chain->images;
+      mtx_unlock(&wsi->wait_mutex);
+      VkResult result =
+         chain->base.wsi->WaitForFences(chain->base.device, 1, &chain->base.fences[index],
+                                        VK_TRUE, UINT64_MAX);
+      mtx_lock(&wsi->wait_mutex);
+
+      image->state = WSI_IMAGE_QUEUED;
+      if (result == VK_SUCCESS)
+         result = _wsi_display_queue_next(&chain->base);
+      if (result != VK_SUCCESS) {
+         chain->status = result;
+         /* An acquire may already be blocked, and this isn't its caller's
+          * thread: free the image and wake it, so it returns the status.
+          */
+         if (image->state == WSI_IMAGE_QUEUED)
+            image->state = WSI_IMAGE_IDLE;
+         u_cnd_monotonic_broadcast(&wsi->wait_cond);
+      }
+   }
+   mtx_unlock(&wsi->wait_mutex);
+   return NULL;
+}
+
 static VkResult
 wsi_display_queue_present(struct wsi_swapchain *drv_chain,
                           uint32_t image_index,
@@ -3349,9 +3449,14 @@ wsi_display_queue_present(struct wsi_swapchain *drv_chain,
 
    memset(&chain->timing_request, 0, sizeof(chain->timing_request));
    image->flip_sequence = ++chain->flip_sequence;
-   image->state = WSI_IMAGE_QUEUED;
-
-   result = _wsi_display_queue_next(drv_chain);
+   if (chain->gpu_wait) {
+      image->state = WSI_IMAGE_GPU_WAIT;
+      u_cnd_monotonic_signal(&chain->gpu_wait_cond);
+      result = VK_SUCCESS;
+   } else {
+      image->state = WSI_IMAGE_QUEUED;
+      result = _wsi_display_queue_next(drv_chain);
+   }
    if (result != VK_SUCCESS)
       chain->status = result;
 
@@ -3589,6 +3694,16 @@ wsi_display_surface_create_swapchain(
     */
    if (display_mode->connector->plane_property[IN_FENCE_FD] != (uint32_t) -1)
       wsi_drm_init_swapchain_present_sync_file(&chain->base);
+
+   /* Neither of those: this swapchain's flips wait for the GPU themselves. */
+   if (chain->base.present_sync_semaphore == VK_NULL_HANDLE &&
+       u_cnd_monotonic_init(&chain->gpu_wait_cond) == thrd_success) {
+      if (pthread_create(&chain->gpu_wait_thread, NULL,
+                         wsi_display_gpu_wait_thread, chain) == 0)
+         chain->gpu_wait = true;
+      else
+         u_cnd_monotonic_destroy(&chain->gpu_wait_cond);
+   }
 
    *swapchain_out = &chain->base;
 
