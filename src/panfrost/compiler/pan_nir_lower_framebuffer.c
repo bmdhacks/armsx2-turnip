@@ -422,7 +422,9 @@ static nir_def *pan_pack(nir_builder *b,
          nir_def *clamped = pan_fsat(b, unpacked, snorm);
          nir_def *normed = nir_fmul_imm(b, clamped, multiplier);
 
-         raw = nir_f2uN(b, normed, d.size);
+         /* Round to nearest, as Vulkan and GL want and the packs below do:
+          * f2u truncates. */
+         raw = nir_f2uN(b, nir_fround_even(b, normed), d.size);
       }
 
       /* Pack the raw format */
@@ -444,6 +446,7 @@ static nir_def *pan_pack(nir_builder *b,
    case PIPE_FORMAT_A4R4_UNORM:
    case PIPE_FORMAT_R4A4_UNORM:
    case PIPE_FORMAT_A4B4G4R4_UNORM:
+   case PIPE_FORMAT_A4R4G4B4_UNORM:
    case PIPE_FORMAT_R4G4B4A4_UNORM:
       return pan_pack_unorm(b, unpacked, 4, 4, 4, 4);
    case PIPE_FORMAT_B5G5R5A1_UNORM:
