@@ -7,6 +7,7 @@
 #define __BI_QUIRKS_H
 
 #include "panfrost/model/pan_model.h"
+#include "panfrost/compiler/pan_compiler.h"
 
 /* Model-specific quirks requiring compiler workarounds/etc. Quirks
  * may be errata requiring a workaround, or features. We're trying to be
@@ -47,6 +48,18 @@ bifrost_get_quirks(unsigned arch, const struct pan_model *model)
       quirks |= BIFROST_LIMITED_CLPER;
 
    return quirks;
+}
+
+/* The subgroup size of a Bifrost GPU: its warp width. The GPUs before 7.2
+ * (Mali-G31 and G51 at 7.0) run 4-wide warps, not pan_subgroup_size's 8:
+ * on a G31 the lane ID counts 0..3 in every group of 4 invocations. They
+ * are the BIFROST_LIMITED_CLPER GPUs, whose CLPER is fixed at subgroup4. */
+static inline unsigned
+bifrost_subgroup_size(unsigned arch, const struct pan_model *model)
+{
+   if (arch < 9 && (bifrost_get_quirks(arch, model) & BIFROST_LIMITED_CLPER))
+      return 4;
+   return pan_subgroup_size(arch);
 }
 
 #endif

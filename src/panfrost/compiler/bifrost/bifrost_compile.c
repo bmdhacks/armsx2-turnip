@@ -1985,6 +1985,20 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
    case nir_intrinsic_ballot:
    case nir_intrinsic_ballot_relaxed: {
       assert(instr->src[0].ssa->bit_size == 32);
+      if (b->shader->quirks & BIFROST_LIMITED_CLPER) {
+         /* No WMASK before 7.2 (a G31 faults with INSTR_INVALID_ENC on
+          * it): gather the 4-wide warp's bits with the old CLPER, whose
+          * inactive lanes read as zero. */
+         bi_index bit = bi_lshift_and_i32(b, bi_src_index(&instr->src[0]),
+                                          bi_imm_u32(1), bi_imm_u8(0));
+         bi_index acc = bi_clper_old_i32(b, bit, bi_imm_u8(0));
+         for (unsigned lane = 1; lane < 4; lane++) {
+            bi_index v = bi_clper_old_i32(b, bit, bi_imm_u8(lane));
+            acc = bi_lshift_or_i32(b, v, acc, bi_imm_u8(lane));
+         }
+         bi_mov_i32_to(b, dst, acc);
+         break;
+      }
       enum bi_subgroup subgroup =
          bi_subgroup_from_cluster_size(pan_subgroup_size(b->shader->arch));
       bi_wmask_to(b, dst, bi_src_index(&instr->src[0]), subgroup, 0);
@@ -1993,6 +2007,13 @@ bi_emit_intrinsic(bi_builder *b, nir_intrinsic_instr *instr)
 
    case nir_intrinsic_read_invocation: {
       assert(instr->src[0].ssa->bit_size <= 32);
+      if (b->shader->quirks & BIFROST_LIMITED_CLPER) {
+         /* The old CLPER: subgroup4, inactive lanes zero, no lane op. */
+         bi_mov_i32_to(b, dst,
+                       bi_clper_old_i32(b, bi_src_index(&instr->src[0]),
+                                        bi_byte(bi_src_index(&instr->src[1]), 0)));
+         break;
+      }
       enum bi_inactive_result inactive_result = BI_INACTIVE_RESULT_ZERO;
       enum bi_lane_op lane_op = BI_LANE_OP_NONE;
       enum bi_subgroup subgroup =
