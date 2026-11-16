@@ -1067,6 +1067,8 @@ bifrost_postprocess_nir(nir_shader *nir,
 
    const nir_lower_idiv_options lower_idiv_opts = {
       .allow_fp16 = true,
+      /* Bifrost has no high multiply: divide from the fp32 reciprocal. */
+      .fp32_udiv_correction = gpu_arch < 9,
    };
    NIR_PASS(_, nir, nir_lower_idiv, &lower_idiv_opts);
 
