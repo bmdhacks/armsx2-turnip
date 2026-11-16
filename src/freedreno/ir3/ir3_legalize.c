@@ -428,6 +428,8 @@ ir3_merge_pred_legalize_states(struct ir3_legalize_state *state,
    /* We need to take phsyical-only edges into account when tracking shared
     * registers.
     */
+   const bool tex_waw_quirk =
+      block->shader->compiler->info->props.divergent_tex_waw_quirk;
    for (unsigned i = 0; i < block->physical_predecessors_count; i++) {
       struct ir3_block *predecessor = block->physical_predecessors[i];
       struct ir3_legalize_state *pstate = get_state(predecessor);
@@ -435,6 +437,14 @@ ir3_merge_pred_legalize_states(struct ir3_legalize_state *state,
       if (!pstate) {
          continue;
       }
+
+      /* The other side of a divergent branch may still have a texture write
+       * outstanding to the registers this side writes
+       * (divergent_tex_waw_quirk): carry its (sy) state over the physical
+       * edge too.
+       */
+      if (tex_waw_quirk)
+         regmask_or(&state->needs_sy, &state->needs_sy, &pstate->needs_sy);
 
       regmask_or_shared(&state->needs_ss, &state->needs_ss, &pstate->needs_ss);
       regmask_or_shared(&state->needs_ss_scalar_full,

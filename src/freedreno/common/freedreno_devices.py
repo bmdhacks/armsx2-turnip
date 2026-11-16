@@ -168,6 +168,8 @@ a6xx_gen1_low = GPUProps(
         supports_double_threadsize = False,
         # ARMSX2: measured on the Adreno 613 only (see freedreno_dev_info.h).
         sysmem_ds_clear_avoids_2d = True,
+        # ARMSX2: measured on the Adreno 610 and 613; the Adreno 650 does not need it.
+        divergent_tex_waw_quirk = True,
     )
 
 a6xx_gen1 = GPUProps(

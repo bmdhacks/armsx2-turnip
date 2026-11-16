@@ -517,6 +517,16 @@ struct fd_dev_info {
        */
       bool has_resbase;
 
+      /* A wave runs both sides of a divergent branch, one after the other. On
+       * the Adreno 610 and 613 a texture instruction issued on one side can
+       * corrupt the result of one still outstanding from the other side when
+       * both write the same registers (for their own lanes), so a pending
+       * texture write is tracked across that physical edge as well and the
+       * second texture instruction waits for it with (sy). Without it, pixels
+       * differ from one run of the same commands to the next.
+       */
+      bool divergent_tex_waw_quirk;
+
       /* On a750+ SUBPASS_FENCE also implicitly does CCU_RESOLVE_CLEAN */
       bool subpass_fence_cleans_resolve;
    } props;
