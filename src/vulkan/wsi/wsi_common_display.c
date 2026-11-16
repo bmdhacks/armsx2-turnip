@@ -3695,8 +3695,15 @@ wsi_display_surface_create_swapchain(
    if (display_mode->connector->plane_property[IN_FENCE_FD] != (uint32_t) -1)
       wsi_drm_init_swapchain_present_sync_file(&chain->base);
 
-   /* Neither of those: this swapchain's flips wait for the GPU themselves. */
-   if (chain->base.present_sync_semaphore == VK_NULL_HANDLE &&
+   /* A driver without implicit sync and neither of those: this swapchain's
+    * flips wait for the GPU themselves. Where the kernel tracks the GPU's
+    * writes, or wsi_common attaches the present's sync file to the buffer
+    * (dma_buf_semaphore), the flip is fenced already.
+    */
+   if (wsi_device->no_dma_buf_implicit_sync &&
+       !chain->base.image_info.explicit_sync &&
+       chain->base.dma_buf_semaphore == VK_NULL_HANDLE &&
+       chain->base.present_sync_semaphore == VK_NULL_HANDLE &&
        u_cnd_monotonic_init(&chain->gpu_wait_cond) == thrd_success) {
       if (pthread_create(&chain->gpu_wait_thread, NULL,
                          wsi_display_gpu_wait_thread, chain) == 0)
