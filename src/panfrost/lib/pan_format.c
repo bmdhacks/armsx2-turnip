@@ -114,7 +114,7 @@ const struct pan_blendable_format
       BFMT(R5G5B5A1_UNORM, R5G5B5A1),
       BFMT(B5G5R5X1_UNORM, R5G5B5A1),
 #if PAN_ARCH == 7
-      /* Milestone 11 B5: alpha in bit 0 (VK R5G5B5A1/B5G5R5A1_UNORM_PACK16). */
+      /* Alpha in bit 0 (VK R5G5B5A1/B5G5R5A1_UNORM_PACK16). */
       BFMT2(A1B5G5R5_UNORM, R5G5B5A1, A1B5G5R5, 0),
       BFMT2(A1R5G5B5_UNORM, R5G5B5A1, A1B5G5R5, 0),
 #endif
@@ -339,7 +339,7 @@ const struct pan_format GENX(pan_pipe_format)[PIPE_FORMAT_COUNT] = {
    FMT(R5G5B5X1_UNORM,          RGB5_A1_UNORM,   RGB1, L, VT__IB),
    FMT(B5G5R5X1_UNORM,          RGB5_A1_UNORM,   BGR1, L, VT__IB),
 #if PAN_ARCH == 7
-   /* Milestone 11 B5: alpha in bit 0, then B, G, R. */
+   /* Alpha in bit 0, then B, G, R. */
    FMT(A1B5G5R5_UNORM,          A1_BGR5_UNORM,   RGBA, L, _TR___),
    FMT(A1R5G5B5_UNORM,          A1_BGR5_UNORM,   BGRA, L, _TR___),
 #endif
