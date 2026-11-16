@@ -22,7 +22,7 @@ kind of change a downstream can make and an upstream should not.
 
 | Branch | Base | What |
 |---|---|---|
-| `armsx2/main` | upstream Mesa `main` of 2026-10-21 (`1fddf34d3cd`, Mesa 27.0.0-devel), rebased from time to time | The release line. Current packs are built from here. |
+| `armsx2/main` | upstream Mesa `main` of 2026-11-16 (`fd3877af96e`, Mesa 27.0.0-devel), rebased from time to time | The release line. Current packs are built from here. |
 | `armsx2/26.1.2` | Mesa tag `mesa-26.1.2` | The older line, kept for the records that were measured on it. Mesa before 26.2 hangs on some depth/stencil draws on Adreno 6xx, so ARMSX2 turns its stencil buffer off under it, which costs speed. |
 
 Each branch is the base plus a short series of ARMSX2 commits; `git log
@@ -36,6 +36,14 @@ reported as a plain timeout now surface as device-lost or an error), the
 input-attachment lowering in `tu_shader.cc` was rewritten, and upstream dropped
 `magic_regs` from the device table. The changes below were re-read against that
 code, not only recompiled.
+
+The 2026-11-16 rebase took two changes from upstream that overlap ours. Upstream
+now gives the Adreno 722 two CCUs, so our A722 description no longer changes
+that field. Upstream also made the autotuner take one render-pass history
+reference per decision and ordered the reference drop before the reaper's check;
+our cheaper per-pass bookkeeping keeps its single locked lookup and clock-free
+handles, and takes upstream's memory ordering and its cleanup of old latency
+timestamps.
 
 ## What the patches do
 
