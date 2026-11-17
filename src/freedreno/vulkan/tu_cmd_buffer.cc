@@ -8434,9 +8434,14 @@ tu6_build_depth_plane_z_mode(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
 
    /* If there is explicit depth direction in FS writing gl_FragDepth
     * may be compatible with LRZ test.
+    *
+    * Without LRZ the same holds for the per-pixel test: a shader whose
+    * declared depth direction is safe for the compare op (force_late_z is
+    * false, see tu6_calculate_lrz_state) is tested early to reject and
+    * tested and written again late with the depth it writes.
     */
-   if (cmd->state.lrz.enabled && fs->variant->writes_pos &&
-       zmode == A6XX_EARLY_Z) {
+   if (fs->variant->writes_pos && zmode == A6XX_EARLY_Z &&
+       (cmd->state.lrz.enabled || !cmd->state.lrz.force_late_z)) {
       zmode = A6XX_EARLY_Z_LATE_Z;
    }
 

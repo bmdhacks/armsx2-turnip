@@ -1286,6 +1286,33 @@ tu_lrz_track_stencil_tag_state(struct tu_cmd_buffer *cmd, uint32_t a)
       tu_lrz_disable_write_for_rp(cmd, "stencil write based on depth test");
 }
 
+/* A fragment shader that writes depth in a declared direction keeps the
+ * early depth test when the compare op makes that direction safe: with a
+ * LESS layout under GREATER or GREATER_OR_EQUAL (or GREATER under LESS or
+ * LESS_OR_EQUAL), a fragment that fails with its interpolated depth also
+ * fails with the depth the shader writes. UNCHANGED is safe under any op.
+ */
+static bool
+tu_fs_depth_direction_allows_early_z(const struct tu_cmd_buffer *cmd,
+                                     const struct tu_shader *fs,
+                                     VkCompareOp op)
+{
+   if (cmd->device->instance->drirc.misc.ignore_frag_depth_direction)
+      return false;
+
+   switch (fs->variant->fs.depth_layout) {
+   case FRAG_DEPTH_LAYOUT_UNCHANGED:
+      return true;
+   case FRAG_DEPTH_LAYOUT_GREATER:
+      return op == VK_COMPARE_OP_LESS || op == VK_COMPARE_OP_LESS_OR_EQUAL;
+   case FRAG_DEPTH_LAYOUT_LESS:
+      return op == VK_COMPARE_OP_GREATER ||
+             op == VK_COMPARE_OP_GREATER_OR_EQUAL;
+   default:
+      return false;
+   }
+}
+
 template <chip CHIP>
 static struct __GRAS_LRZ_CNTL
 tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
@@ -1300,8 +1327,13 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
 
    struct __GRAS_LRZ_CNTL gras_lrz_cntl = { 0 };
 
+   /* Decided here, before the LRZ checks below, because the depth plane's
+    * z_mode uses it whether or not LRZ is valid (sysmem passes never have
+    * valid LRZ).
+    */
    cmd->state.lrz.force_late_z =
-      fs->variant->writes_pos && !fs->variant->fs.early_fragment_tests;
+      fs->variant->writes_pos && !fs->variant->fs.early_fragment_tests &&
+      !tu_fs_depth_direction_allows_early_z(cmd, fs, depth_compare_op);
 
    if (!cmd->state.lrz.valid) {
       return gras_lrz_cntl;
@@ -1358,29 +1390,10 @@ tu6_calculate_lrz_state(struct tu_cmd_buffer *cmd,
     * make fragment to NOT pass with GREATER depth test. We just have to
     * enable late Z test.
     */
-   if (!disable_lrz_due_to_fs && fs->variant->writes_pos &&
-       !fs->variant->fs.early_fragment_tests &&
-       !cmd->device->instance->drirc.misc.ignore_frag_depth_direction) {
-      if (fs->variant->fs.depth_layout == FRAG_DEPTH_LAYOUT_NONE ||
-          fs->variant->fs.depth_layout == FRAG_DEPTH_LAYOUT_ANY) {
+   if (fs->variant->writes_pos && !fs->variant->fs.early_fragment_tests) {
+      if (!tu_fs_depth_direction_allows_early_z(cmd, fs, depth_compare_op))
          disable_lrz_due_to_fs = true;
-      } else {
-         if (fs->variant->fs.depth_layout == FRAG_DEPTH_LAYOUT_GREATER) {
-            disable_lrz_due_to_fs =
-               depth_compare_op != VK_COMPARE_OP_LESS &&
-               depth_compare_op != VK_COMPARE_OP_LESS_OR_EQUAL;
-         } else if (fs->variant->fs.depth_layout == FRAG_DEPTH_LAYOUT_LESS) {
-            disable_lrz_due_to_fs =
-               depth_compare_op != VK_COMPARE_OP_GREATER &&
-               depth_compare_op != VK_COMPARE_OP_GREATER_OR_EQUAL;
-         }
-         /* FRAG_DEPTH_LAYOUT_UNCHANGED is always OK.*/
-      }
-
       cmd->state.lrz.force_late_z = disable_lrz_due_to_fs;
-   } else if (fs->variant->writes_pos && !fs->variant->fs.early_fragment_tests) {
-      disable_lrz_due_to_fs = true;
-      cmd->state.lrz.force_late_z = true;
    } else {
       cmd->state.lrz.force_late_z = false;
    }
