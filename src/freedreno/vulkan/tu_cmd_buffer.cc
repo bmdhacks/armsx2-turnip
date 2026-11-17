@@ -8470,9 +8470,14 @@ tu6_build_depth_plane_z_mode(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
       zmode = A6XX_LATE_Z;
    }
 
-   /* A630/A650 hangs with this combination of states. */
+   /* A630/A650 hangs with this combination of states. On parts with
+    * d32s8_kill_hang_needs_stencil only a draw with the stencil test on is
+    * demoted.
+    */
    if (CHIP == A6XX && zmode == A6XX_EARLY_Z_LATE_Z && depth_format == VK_FORMAT_D32_SFLOAT_S8_UINT &&
-       fs_kill_fragments)
+       fs_kill_fragments &&
+       (stencil_test_enable ||
+        !cmd->device->physical_device->info->props.d32s8_kill_hang_needs_stencil))
       zmode = A6XX_LATE_Z;
 
    if ((stencil_test_enable && depth_format == VK_FORMAT_S8_UINT) ||

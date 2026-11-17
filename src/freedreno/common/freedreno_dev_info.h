@@ -309,6 +309,16 @@ struct fd_dev_info {
        */
       bool sysmem_ds_clear_avoids_2d;
 
+      /* ARMSX2: the D32_SFLOAT_S8_UINT hang with EARLY_Z_LATE_Z and a
+       * discarding fragment shader needs the stencil test. Upstream demotes
+       * every such draw to LATE_Z on a6xx. Where this is set, only a
+       * discarding draw with the stencil test on is demoted; one that discards
+       * and writes depth without stencil keeps the early test. Measured on the
+       * Adreno 613: with no demotion at all the GPU wedges on a discarding
+       * stencil-writing draw, with this rule it does not.
+       */
+      bool d32s8_kill_hang_needs_stencil;
+
       bool has_attachment_shading_rate;
 
       /* Whether mipmaps below certain threshold can use LINEAR tiling when higher
