@@ -5808,6 +5808,20 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
          tu_cs_emit_draw_state(cs, TU_DRAW_STATE_DYNAMIC + i, pipeline->dynamic_state[i]);
    }
 
+   /* A draw state the previous pipeline set statically and this one takes
+    * from dynamic state: its slot still holds the previous pipeline's group,
+    * and nothing re-emits it unless the dynamic value changes. That misses
+    * the case where the static group's values never reached the dynamic
+    * state, which happens when the application declared the state dynamic but
+    * the pipeline did not need it (blend constants in a pipeline that blends
+    * nothing get a static group of zeros). The next pipeline that blends with
+    * a constant then reads zeros. Mark the dynamic state dirty so that every
+    * group this pipeline does not set is emitted again from dynamic state.
+    */
+   if (cmd->state.pipeline_draw_states & ~set_state_mask)
+      BITSET_SET_RANGE(cmd->vk.dynamic_graphics_state.dirty, 0,
+                       MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX - 1);
+
    cmd->state.pipeline_draw_states = set_state_mask;
    u_foreach_bit(i, set_state_mask)
       cmd->state.dynamic_state[i] = pipeline->dynamic_state[i];
