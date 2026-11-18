@@ -125,6 +125,19 @@ tu6_emit_load_state(struct tu_device *device,
    struct tu_cs cs;
    tu_cs_begin_sub_stream(&pipeline->cs, size, &cs);
 
+   /* No texture or sampler preloads on a6xx. The preload runs when the
+    * draw's descriptor state is applied, while the previous draw may still
+    * be sampling. On the Adreno 613 in GMEM, a draw sampling 32
+    * image/sampler pairs through a non-uniformly indexed array, followed by
+    * draws with other sets bound, sampled a few pixels wrongly, differently
+    * from run to run. Without the preload, or with a
+    * wait for idle between the draws, every run is identical. Qualcomm's
+    * driver does not preload these on a6xx either. The Adreno 722 does not
+    * show the race, so a7xx keeps the preload. tu6_load_state_size() still
+    * counts these packets; the sub-stream is larger than needed on a6xx.
+    */
+   const bool preload_tex = device->physical_device->info->chip >= 7;
+
    for (unsigned i = 0; i < layout->num_sets; i++) {
       /* From 13.2.7. Descriptor Set Binding:
        *
@@ -199,6 +212,8 @@ tu6_emit_load_state(struct tu_device *device,
          case VK_DESCRIPTOR_TYPE_SAMPLER:
          case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
          case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER: {
+            if (!preload_tex)
+               break;
             tu_foreach_stage(stage, stages) {
                emit_load_state(&cs, tu6_stage2opcode(stage),
                                binding->type == VK_DESCRIPTOR_TYPE_SAMPLER ?
@@ -222,6 +237,8 @@ tu6_emit_load_state(struct tu_device *device,
          }
          case VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER:
          case VK_DESCRIPTOR_TYPE_BLOCK_MATCH_IMAGE_QCOM: {
+            if (!preload_tex)
+               break;
             tu_foreach_stage(stage, stages) {
                /* TODO: We could emit less CP_LOAD_STATE6 if we used
                 * struct-of-arrays instead of array-of-structs.
