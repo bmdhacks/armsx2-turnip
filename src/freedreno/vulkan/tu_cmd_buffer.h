@@ -647,6 +647,51 @@ struct tu_cmd_state
    bool pipeline_blend_lrz, pipeline_bandwidth, pipeline_disable_fs;
    uint32_t pipeline_draw_states;
 
+   /* ARMSX2: the group last emitted into draw_cs under each id since the last
+    * full re-emission (TU_CMD_DIRTY_DRAW_STATE), for the ids a pipeline bind
+    * or a dynamic-state change may skip when unchanged: the program groups,
+    * PRIM_MODE_GMEM and the dynamic groups. A bit in cur_group_valid says the
+    * entry is what the CP currently holds for that id. Cleared wherever the
+    * hardware's draw state is reset (tu_disable_draw_states) and rebuilt by
+    * the full re-emission; see tu_cmd_emit_groups().
+    */
+   struct tu_draw_state cur_group[TU_DRAW_STATE_COUNT];
+   uint64_t cur_group_valid;
+
+   /* ARMSX2 fast draw (tu_fastdraw.h). fd_active: the last draw came through
+    * vkCmdFastDrawARMSX2, so the runtime's dynamic-state copy, the dirty bits
+    * and the per-draw tables below describe an older draw; tu_fastdraw_leave()
+    * brings them back before any ordinary bind or draw. The other fields are
+    * what the entry last sent, valid only while fd_active.
+    */
+   bool fd_active;
+   bool fd_scissor_valid;
+   bool fd_blend_valid;
+   bool fd_pc_cntl_valid;
+   uint8_t fd_lrz_size;
+#ifdef TU_FASTDRAW_CHECK
+   uint32_t fd_check_owed;
+#endif
+   struct tu_pipeline *fd_pipeline;
+   /* The last graphics pipeline bound the ordinary way. */
+   struct tu_pipeline *fd_generic_pipeline;
+   const struct tu_shader *fd_lrz_fs;
+   uint32_t fd_env;
+   uint32_t fd_lrz_id;
+   uint32_t fd_pc_cntl;
+   VkRect2D fd_scissor;
+   uint32_t fd_blend[4];
+   uint32_t fd_lrz[16];
+   /* The dynamic draw-state slots the direct path's pipelines held statically
+    * since it was entered: those groups may be in the CP in place of what the
+    * ordinary path's record says.
+    */
+   uint32_t fd_static_union;
+   /* Runtime dirty bits a catch-up left set (they feed no group of the bound
+    * pipeline); the run entry does not catch up again for them.
+    */
+   BITSET_DECLARE(fd_dyn_acked, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
+
    /* VK_QUERY_PIPELINE_STATISTIC_CLIPPING_INVOCATIONS_BIT and
     * VK_QUERY_TYPE_PRIMITIVES_GENERATED_EXT are allowed to run simultaniously,
     * but they use the same {START,STOP}_PRIMITIVE_CTRS control.

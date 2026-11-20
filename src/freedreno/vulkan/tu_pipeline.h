@@ -181,6 +181,13 @@ enum tu_pipeline_type {
    TU_PIPELINE_COMPUTE,
 };
 
+void tu_group_intern_init(struct tu_device *dev);
+void tu_group_intern_finish(struct tu_device *dev);
+uint32_t tu_group_intern_id(struct tu_device *dev, const uint32_t *dw,
+                            uint32_t size);
+
+struct tu_fastdraw_bake;
+
 struct tu_pipeline
 {
    struct vk_object_base base;
@@ -188,6 +195,7 @@ struct tu_pipeline
 
    struct tu_cs cs;
    struct tu_suballoc_bo bo;
+
 
    VkShaderStageFlags active_stages;
    uint32_t active_desc_sets;
@@ -228,6 +236,13 @@ struct tu_pipeline
    struct tu_lrz_blend lrz_blend;
    struct tu_bandwidth bandwidth;
    struct tu_disable_fs disable_fs;
+
+   /* ARMSX2: what vkCmdFastDrawARMSX2 knows about this pipeline, built at
+    * its first use there (tu_fastdraw.h). fastdraw_env_id is the bake's
+    * env_id for a pipeline that was only ever bound the ordinary way.
+    */
+   struct tu_fastdraw_bake *fastdraw;
+   uint32_t fastdraw_env_id;
 
    void *executables_mem_ctx;
    /* tu_pipeline_executable */

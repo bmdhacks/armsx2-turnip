@@ -8,6 +8,8 @@
 
 #include "tu_common.h"
 
+#include "util/hash_table.h"
+
 #include "freedreno_pm4.h"
 
 #include "tu_knl.h"
@@ -69,6 +71,15 @@ struct tu_draw_state {
    uint64_t iova;
    uint16_t size;
    bool writeable;
+   /* ARMSX2: for a group owned by a pipeline, the id of its dwords in the
+    * device's table of interned group contents (tu_device::group_intern),
+    * looked up once when the pipeline is created: two groups with the same
+    * nonzero id have byte-identical dwords. A bind compares ids, never reads
+    * GPU memory (which is write-combined) and never compares dwords; see
+    * tu_draw_state_same(). Zero for every other group, which is then compared
+    * by address only.
+    */
+   uint32_t content_id;
 };
 
 /* A stream that keeps BOs it is not using frees them after this many
@@ -313,6 +324,20 @@ tu_cs_end_draw_state(struct tu_cs *cs, struct tu_cs *sub_cs)
       .size = entry.size / sizeof(uint32_t),
       .writeable = sub_cs->writeable,
    };
+}
+
+/* ARMSX2: whether emitting b after a would change nothing the CP executes.
+ * The same memory is always the same group (draw-state memory is never
+ * rewritten once recorded; writeable groups are never skipped by the caller).
+ * Otherwise both must be interned pipeline groups with the same content id,
+ * which the device's table only gives to byte-identical dwords.
+ */
+static inline bool
+tu_draw_state_same(const struct tu_draw_state *a, const struct tu_draw_state *b)
+{
+   if (a->iova == b->iova && a->size == b->size)
+      return true;
+   return a->content_id && a->content_id == b->content_id;
 }
 
 VkResult

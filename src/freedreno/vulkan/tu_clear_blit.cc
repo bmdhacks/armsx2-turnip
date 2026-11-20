@@ -4744,6 +4744,7 @@ tu_clear_sysmem_attachments(struct tu_cmd_buffer *cmd,
       tu_cs_emit_qw(cs, 0);
    }
    cmd->state.dirty |= TU_CMD_DIRTY_DRAW_STATE;
+   cmd->state.cur_group_valid = 0;
 
    tu_cs_emit_pkt4(cs, REG_A6XX_SP_PS_OUTPUT_CNTL, 2);
    tu_cs_emit(cs, A6XX_SP_PS_OUTPUT_CNTL_DEPTH_REGID(0xfc) |

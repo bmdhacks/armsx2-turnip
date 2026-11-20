@@ -8,6 +8,7 @@
  */
 
 #include "tu_pipeline.h"
+#include "tu_fastdraw.h"
 
 #include "nir/nir.h"
 #include "nir/nir_builder.h"
@@ -4262,6 +4263,41 @@ emit_draw_state(const struct vk_dynamic_graphics_state *dynamic_state,
    return !BITSET_IS_EMPTY(temp);
 }
 
+/* ARMSX2 run entry (tu_fastdraw.h): mark dirty the runtime state each of the
+ * dynamic draw-state slots in slot_mask is built from, so the next draw
+ * rebuilds those groups (and only those) from the runtime's values.
+ */
+void
+tu_fastdraw_dirty_slots(struct vk_dynamic_graphics_state *d, uint32_t slot_mask)
+{
+#define TU_FD_SLOT(id, name)                                                  \
+   if (slot_mask & (1u << (id))) {                                            \
+      for (unsigned i = 0; i < ARRAY_SIZE(tu_##name##_state); i++)            \
+         BITSET_SET(d->dirty, tu_##name##_state[i]);                          \
+   }
+   TU_FD_SLOT(TU_DYNAMIC_STATE_VIEWPORT, viewport);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_SCISSOR, scissor);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_RAST, rast);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_DEPTH_BIAS, depth_bias);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_BLEND_CONSTANTS, blend_constants);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_DS, ds);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_RB_DEPTH_CNTL, rb_depth_cntl);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_SAMPLE_LOCATIONS, sample_locations);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_VB_STRIDE, vertex_stride);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_BLEND, blend);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_VERTEX_INPUT, vertex_input);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_PATCH_CONTROL_POINTS, patch_control_points);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_PRIM_MODE_SYSMEM, prim_mode_sysmem);
+   TU_FD_SLOT(TU_DYNAMIC_STATE_A7XX_FRAGMENT_SHADING_RATE, fragment_shading_rate);
+   /* The pipeline facts the ordinary path recomputes from runtime state when
+    * a pipeline leaves them open.
+    */
+   TU_FD_SLOT(TU_FASTDRAW_SLOT_FACTS, bandwidth);
+   TU_FD_SLOT(TU_FASTDRAW_SLOT_FACTS, blend_lrz);
+   TU_FD_SLOT(TU_FASTDRAW_SLOT_FACTS, disable_fs);
+#undef TU_FD_SLOT
+}
+
 template <chip CHIP>
 uint32_t
 tu_emit_draw_state(struct tu_cmd_buffer *cmd)
@@ -4417,6 +4453,17 @@ tu_emit_draw_state(struct tu_cmd_buffer *cmd)
                    &cmd->vk.dynamic_graphics_state.ds,
                    &cmd->state.vk_rp,
                    &cmd->vk.dynamic_graphics_state.rs);
+   /* ARMSX2: without a tessellation control shader the group is empty
+    * (tu6_emit_patch_control_points writes nothing), so build no sub-stream
+    * for it at every draw; the empty group is still recorded as dirty and
+    * sent unless the CP already holds an empty one.
+    */
+   if (!cmd->state.shaders[MESA_SHADER_TESS_CTRL]->variant &&
+       (EMIT_STATE(patch_control_points) || (cmd->state.dirty & TU_CMD_DIRTY_PROGRAM)) &&
+       !(cmd->state.pipeline_draw_states & (1u << TU_DYNAMIC_STATE_PATCH_CONTROL_POINTS))) {
+      cmd->state.dynamic_state[TU_DYNAMIC_STATE_PATCH_CONTROL_POINTS] = {};
+      dirty_draw_states |= (1u << TU_DYNAMIC_STATE_PATCH_CONTROL_POINTS);
+   } else
    DRAW_STATE_COND(patch_control_points,
                    TU_DYNAMIC_STATE_PATCH_CONTROL_POINTS,
                    cmd->state.dirty & TU_CMD_DIRTY_PROGRAM,
@@ -4546,6 +4593,7 @@ tu_pipeline_finish(struct tu_pipeline *pipeline,
                    struct tu_device *dev,
                    const VkAllocationCallbacks *alloc)
 {
+   tu_fastdraw_bake_free(dev, pipeline);
    tu_cs_finish(&pipeline->cs);
    TU_RMV(resource_destroy, dev, &pipeline->bo);
 
@@ -4594,6 +4642,593 @@ vk_shader_stage_to_pipeline_library_flags(VkShaderStageFlagBits stage)
       return VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT;
    default:
       UNREACHABLE("Invalid shader stage");
+   }
+}
+
+/* ARMSX2: give each of the pipeline's own groups (the ones in its own
+ * suballocated BO; groups taken from a library or shared by a shader are
+ * left alone and compare by address) the content id of its dwords in the
+ * device's intern table, once, now that the dwords are final, so a bind can
+ * tell them from the groups the CP already holds by comparing two integers
+ * (tu_draw_state_same()). Writeable groups get no id: FDM patches them.
+ */
+struct tu_group_key {
+   uint32_t hash;
+   uint32_t size; /* dwords */
+   uint32_t id;
+   uint32_t dw[];
+};
+
+static uint32_t
+tu_group_key_hash(const void *key)
+{
+   return ((const struct tu_group_key *) key)->hash;
+}
+
+static bool
+tu_group_key_equal(const void *a, const void *b)
+{
+   const struct tu_group_key *ka = (const struct tu_group_key *) a;
+   const struct tu_group_key *kb = (const struct tu_group_key *) b;
+   return ka->hash == kb->hash && ka->size == kb->size &&
+          memcmp(ka->dw, kb->dw, ka->size * sizeof(uint32_t)) == 0;
+}
+
+void
+tu_group_intern_init(struct tu_device *dev)
+{
+   mtx_init(&dev->group_intern_mutex, mtx_plain);
+   dev->group_intern = _mesa_hash_table_create(NULL, tu_group_key_hash,
+                                               tu_group_key_equal);
+   dev->group_intern_next_id = 1;
+}
+
+void
+tu_group_intern_finish(struct tu_device *dev)
+{
+   if (dev->group_intern) {
+      hash_table_foreach(dev->group_intern, entry)
+         free((void *) entry->key);
+      _mesa_hash_table_destroy(dev->group_intern, NULL);
+      dev->group_intern = NULL;
+   }
+   mtx_destroy(&dev->group_intern_mutex);
+}
+
+/* ARMSX2: the id of these dwords in the device's intern table (0 if the
+ * table is unavailable). Equal ids mean byte-identical dwords.
+ */
+uint32_t
+tu_group_intern_id(struct tu_device *dev, const uint32_t *dw, uint32_t size)
+{
+   if (!dev->group_intern || !size)
+      return 0;
+
+   struct tu_group_key *key = (struct tu_group_key *)
+      malloc(sizeof(*key) + size * sizeof(uint32_t));
+   if (!key)
+      return 0;
+   memcpy(key->dw, dw, size * sizeof(uint32_t));
+   key->size = size;
+   key->hash = _mesa_hash_data(key->dw, size * sizeof(uint32_t));
+
+   uint32_t id = 0;
+   mtx_lock(&dev->group_intern_mutex);
+   struct hash_entry *e =
+      _mesa_hash_table_search_pre_hashed(dev->group_intern, key->hash, key);
+   if (e) {
+      id = ((const struct tu_group_key *) e->key)->id;
+      free(key);
+   } else {
+      key->id = dev->group_intern_next_id++;
+      if (key->id && _mesa_hash_table_insert_pre_hashed(dev->group_intern,
+                                                        key->hash, key, NULL)) {
+         id = key->id;
+      } else {
+         free(key);
+      }
+   }
+   mtx_unlock(&dev->group_intern_mutex);
+   return id;
+}
+
+/* ARMSX2 fast draw (tu_fastdraw.h): the pipeline side. */
+
+/* The dynamic groups the entry accounts for itself when the pipeline does not
+ * own them. Any other group the pipeline does not own is left as the generic
+ * path last built it, which is only right while the pipeline state that group
+ * reads is unchanged: tu_fastdraw_env_id() names that state.
+ */
+uint32_t
+tu_fastdraw_env_id(struct tu_device *dev, struct tu_pipeline *pipeline)
+{
+   if (pipeline->fastdraw_env_id)
+      return pipeline->fastdraw_env_id;
+   if (pipeline->type != TU_PIPELINE_GRAPHICS)
+      return 0;
+
+   const struct tu_graphics_pipeline *gfx = tu_pipeline_to_graphics(pipeline);
+   const struct vk_dynamic_graphics_state *d = &gfx->dynamic_state;
+
+   /* Everything a group outside set_state_mask and TU_FASTDRAW_OWN_GROUPS
+    * can read from the pipeline: the whole rasterization, multisample and
+    * shading-rate state, the static part of the viewport state, and which
+    * groups the pipeline owns at all. Wider than needed on purpose.
+    */
+   uint32_t k[96];
+   unsigned n = 0;
+   memset(k, 0, sizeof(k));
+   k[n++] = 0xfa57d7a0; /* not a group's dwords */
+   k[n++] = pipeline->set_state_mask;
+   k[n++] = d->vp.depth_clip_negative_one_to_one;
+   k[n++] = d->vp.depth_clamp_mode;
+   memcpy(&k[n], &d->vp.depth_clamp_range, sizeof(d->vp.depth_clamp_range));
+   n += DIV_ROUND_UP(sizeof(d->vp.depth_clamp_range), 4);
+   k[n++] = d->ms.rasterization_samples;
+   k[n++] = d->ms.sample_mask;
+   k[n++] = d->ms.alpha_to_one_enable;
+   k[n++] = d->ms.sample_locations_enable;
+   k[n++] = pipeline->program.writes_shading_rate |
+            (pipeline->program.reads_shading_rate << 1) |
+            (pipeline->program.per_view_viewport << 2) |
+            (pipeline->program.per_layer_viewport << 3) |
+            (pipeline->program.fake_single_viewport << 4);
+   STATIC_ASSERT(sizeof(d->fsr) <= 8 * 4);
+   memcpy(&k[n], &d->fsr, sizeof(d->fsr));
+   n += 8;
+   STATIC_ASSERT(sizeof(d->rs) <= 40 * 4);
+   {
+      struct vk_rasterization_state rs;
+      memcpy(&rs, &d->rs, sizeof(rs));
+      /* Line width is the entry's own (RAST is built at width 1). */
+      rs.line.width = 0.0f;
+      memcpy(&k[n], &rs, sizeof(rs));
+      n += 40;
+   }
+   assert(n <= ARRAY_SIZE(k));
+
+   pipeline->fastdraw_env_id = tu_group_intern_id(dev, k, n);
+   return pipeline->fastdraw_env_id;
+}
+
+void
+tu_fastdraw_bake_free(struct tu_device *dev, struct tu_pipeline *pipeline)
+{
+   struct tu_fastdraw_bake *bake = pipeline->fastdraw;
+   if (!bake)
+      return;
+   if (bake->has_bo) {
+      mtx_lock(&dev->pipeline_mutex);
+      tu_suballoc_bo_free(&dev->pipeline_suballoc, &bake->bo);
+      mtx_unlock(&dev->pipeline_mutex);
+   }
+   free(bake);
+   pipeline->fastdraw = NULL;
+}
+
+/* The render-pass facts tu_calc_disable_fs() reads for this pipeline's
+ * blend state: which of its color attachments exist, and whether the pass has
+ * depth or stencil.
+ */
+uint32_t
+tu_fastdraw_rp_key(const struct tu_pipeline *pipeline,
+                   const struct vk_render_pass_state *rp)
+{
+   const struct tu_graphics_pipeline *gfx =
+      tu_pipeline_to_graphics((struct tu_pipeline *) pipeline);
+   const struct vk_color_blend_state *cb = &gfx->dynamic_state.cb;
+   uint32_t key = rp->attachments & (MESA_VK_RP_ATTACHMENT_DEPTH_BIT |
+                                     MESA_VK_RP_ATTACHMENT_STENCIL_BIT);
+   for (unsigned i = 0; i < cb->attachment_count && i < 16; i++) {
+      if (rp->color_attachment_formats[i] != VK_FORMAT_UNDEFINED)
+         key |= 1u << (16 + i);
+   }
+   return key;
+}
+
+template <chip CHIP>
+struct tu_fastdraw_bake *
+tu_fastdraw_bake_pipeline(struct tu_device *dev, struct tu_pipeline *pipeline,
+                          struct tu_pipeline_layout *layout, uint32_t tex_mask,
+                          const struct vk_render_pass_state *rp)
+{
+   tu_fastdraw_bake_free(dev, pipeline);
+
+   struct tu_fastdraw_bake *bake =
+      (struct tu_fastdraw_bake *) calloc(1, sizeof(*bake));
+   if (!bake)
+      return NULL;
+   pipeline->fastdraw = bake;
+   bake->layout = layout;
+   bake->tex_mask = tex_mask;
+
+#define DECLINE(why)                                                          \
+   do {                                                                       \
+      bake->decline = (why);                                                  \
+      if (TU_FASTDRAW_PRINT_BAKE) {                                          \
+         fprintf(stderr,                                                      \
+                 "TU_FASTDRAW_BAKE: reason %u at line %u (facts %u%u%u, "     \
+                 "unbaked %x, mask %x)\n",                                    \
+                 (unsigned) (why), __LINE__, pipeline->lrz_blend.valid,       \
+                 pipeline->bandwidth.valid, pipeline->disable_fs.valid,       \
+                 ~pipeline->set_state_mask &                                  \
+                    ((1u << TU_DYNAMIC_STATE_COUNT) - 1),                     \
+                 tex_mask);                                                   \
+      }                                                                       \
+      return bake;                                                            \
+   } while (0)
+
+   if (pipeline->type != TU_PIPELINE_GRAPHICS)
+      DECLINE(TU_FASTDRAW_NOT_GRAPHICS);
+
+   const struct tu_graphics_pipeline *gfx = tu_pipeline_to_graphics(pipeline);
+   const struct vk_dynamic_graphics_state *d = &gfx->dynamic_state;
+   const struct tu_shader *vs = pipeline->shaders[MESA_SHADER_VERTEX];
+   struct tu_shader *fs = pipeline->shaders[MESA_SHADER_FRAGMENT];
+
+   if ((pipeline->active_stages &
+        (VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+         VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+         VK_SHADER_STAGE_GEOMETRY_BIT)) ||
+       !vs || !vs->variant || !fs || !fs->variant)
+      DECLINE(TU_FASTDRAW_STAGES);
+
+   /* The facts the bind takes from the pipeline when they are valid there
+    * and the draw recomputes from dynamic state when they are not.
+    */
+   if (!pipeline->lrz_blend.valid || !pipeline->bandwidth.valid)
+      DECLINE(TU_FASTDRAW_PIPELINE_FACTS);
+   /* disable_fs is left to draw time when the fragment shader can discard
+    * or write the sample mask (it would change under an occlusion query).
+    * With the blend state static it depends only on the render pass, so it
+    * is computed for the pass of this first use, which the entry then
+    * requires.
+    */
+   if (!pipeline->disable_fs.valid) {
+      if (!pipeline_contains_all_shader_state(pipeline) ||
+          !(pipeline->set_state_mask & (1u << TU_DYNAMIC_STATE_BLEND)))
+         DECLINE(TU_FASTDRAW_PIPELINE_FACTS);
+      bake->disable_fs_from_rp = true;
+      bake->rp_key = tu_fastdraw_rp_key(pipeline, rp);
+   }
+
+   if (fs->fs.has_fdm || fs->fs.dynamic_input_attachments_used ||
+       fs->fs.max_fdm_layers > 1 ||
+       pipeline->program.per_view_viewport ||
+       pipeline->program.per_layer_viewport ||
+       pipeline->program.fake_single_viewport ||
+       pipeline->program.writes_shading_rate ||
+       pipeline->program.reads_shading_rate ||
+       pipeline->program.uses_ray_intersection)
+      DECLINE(TU_FASTDRAW_FS_FEATURES);
+
+   /* No driver params in either stage: VS_PARAMS is then the two VFD offset
+    * registers and FS_PARAMS is empty.
+    */
+   {
+      const struct tu_program_descriptor_linkage *vl =
+         &pipeline->program.link[MESA_SHADER_VERTEX];
+      if (ir3_const_can_upload(&vl->const_state.allocs,
+                               IR3_CONST_ALLOC_DRIVER_PARAMS, vl->constlen))
+         DECLINE(TU_FASTDRAW_DRIVER_PARAMS);
+
+      const struct tu_program_descriptor_linkage *fl =
+         &pipeline->program.link[MESA_SHADER_FRAGMENT];
+      if (dev->compiler->info->props.load_shader_consts_via_preamble) {
+         if (fs->const_state.fdm_ubo.idx >= 0)
+            DECLINE(TU_FASTDRAW_DRIVER_PARAMS);
+      } else if (fl->const_state.num_driver_params > IR3_DP_FS_DYNAMIC) {
+         uint32_t off = fl->const_state.allocs
+                           .consts[IR3_CONST_ALLOC_DRIVER_PARAMS].offset_vec4;
+         if (off + IR3_DP_FS_DYNAMIC / 4 < fl->constlen)
+            DECLINE(TU_FASTDRAW_DRIVER_PARAMS);
+      }
+   }
+
+   const bool has_fsr_group =
+      dev->physical_device->info->props.has_coherent_ubwc_flag_caches;
+   const uint32_t unbaked =
+      ~pipeline->set_state_mask & ((1u << TU_DYNAMIC_STATE_COUNT) - 1);
+   /* PATCH_CONTROL_POINTS is empty without tessellation, for every pipeline
+    * here. PRIM_MODE_SYSMEM is baked below; on parts where that id is the
+    * shading-rate group it is left to the generic path (env id).
+    */
+   const uint32_t env_groups =
+      (1u << TU_DYNAMIC_STATE_VIEWPORT) |
+      (1u << TU_DYNAMIC_STATE_PATCH_CONTROL_POINTS) |
+      (1u << TU_DYNAMIC_STATE_PRIM_MODE_SYSMEM);
+   if (unbaked & ~(TU_FASTDRAW_OWN_GROUPS | env_groups))
+      DECLINE(TU_FASTDRAW_UNBAKED_GROUP);
+
+   /* Descriptor layout: set 0 starts with two dynamic uniform buffers, its
+    * only dynamic bindings; any later binding (the emulator's vertex storage
+    * buffer when it expands vertices in the vertex shader) is plain and is
+    * read through the set's own address. Set 1 holds sampled images and
+    * combined image samplers.
+    */
+   if (layout->num_sets != 2 || !layout->set[0].layout || !layout->set[1].layout)
+      DECLINE(TU_FASTDRAW_LAYOUT);
+   const struct tu_descriptor_set_layout *l0 = layout->set[0].layout;
+   const struct tu_descriptor_set_layout *l1 = layout->set[1].layout;
+   const unsigned desc_bytes = FDL6_TEX_CONST_DWORDS * 4;
+   if (l0->binding_count < 2 || l0->dynamic_offset_size != 2 * desc_bytes ||
+       l1->dynamic_offset_size != 0 || l1->has_inline_uniforms ||
+       l0->has_inline_uniforms || l1->has_variable_descriptors ||
+       dev->physical_device->reserved_set_idx < 0 ||
+       pipeline->program.dynamic_descriptor_offsets[0] != 0 ||
+       dev->physical_device->compiler_options.enable_ssbo_emulation)
+      DECLINE(TU_FASTDRAW_LAYOUT);
+   for (unsigned i = 0; i < 2; i++) {
+      const struct tu_descriptor_set_binding_layout *b = &l0->binding[i];
+      if (b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC ||
+          b->array_size != 1 || b->size != desc_bytes ||
+          b->dynamic_offset_offset != i * desc_bytes)
+         DECLINE(TU_FASTDRAW_LAYOUT);
+      bake->dyn_offset_dw[i] = b->dynamic_offset_offset / 4;
+   }
+   bake->dyn_units = 2;
+
+   uint32_t tex_end = 0;
+   for (unsigned j = 0; j < l1->binding_count; j++) {
+      const struct tu_descriptor_set_binding_layout *b = &l1->binding[j];
+      if (b->array_size == 0)
+         continue;
+      if (!(tex_mask & (1u << j)))
+         continue;
+      if (j >= TU_FASTDRAW_MAX_TEX || b->array_size != 1 ||
+          b->immutable_samplers_offset ||
+          (b->type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER &&
+           b->type != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE))
+         DECLINE(TU_FASTDRAW_LAYOUT);
+      const bool combined = b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      if (b->size != (combined ? 2 : 1) * desc_bytes)
+         DECLINE(TU_FASTDRAW_LAYOUT);
+      bake->tex[bake->n_tex].binding = j;
+      bake->tex[bake->n_tex].combined = combined;
+      bake->tex[bake->n_tex].offset_dw = b->offset / 4;
+      bake->n_tex++;
+      tex_end = MAX2(tex_end, b->offset + b->size);
+   }
+   if (tex_mask >> l1->binding_count)
+      DECLINE(TU_FASTDRAW_LAYOUT);
+   /* At least one unit, so set 1 always has an address of its own. */
+   bake->tex_units = MAX2(1u, DIV_ROUND_UP(tex_end, desc_bytes));
+
+   /* Pipeline facts, as tu_CmdBindPipeline and tu6_draw_common read them. */
+   bake->ds = d->ds;
+   bake->alpha_to_coverage = d->ms.alpha_to_coverage_enable;
+   bake->lrz_blend_status = pipeline->lrz_blend.lrz_blend_status;
+   bake->disable_fs = bake->disable_fs_from_rp ?
+      tu_calc_disable_fs(&d->cb, rp, d->ms.alpha_to_coverage_enable, fs, false) :
+      pipeline->disable_fs.disable_fs;
+   bake->feedback_loops = gfx->feedback_loops;
+   bake->raster_order = pipeline->output.raster_order_attachment_access ||
+                        pipeline->ds.raster_order_attachment_access;
+   bake->fb_flush = bake->raster_order || bake->feedback_loops != 0;
+   bake->fbl_static = BITSET_TEST(d->set, MESA_VK_DYNAMIC_ATTACHMENT_FEEDBACK_LOOP_ENABLE);
+   bake->fbl_value = d->feedback_loops;
+   bake->disable_gmem = gfx->feedback_loop_may_involve_textures;
+   bake->single_prim = pipeline->prim_order.sysmem_single_prim_mode;
+   bake->has_tess = false;
+   bake->rp_update = bake->disable_gmem || bake->single_prim ||
+                     fs->fs.read_only_input_attachments;
+   bake->needs_depth_att = d->ds.depth.test_enable;
+   bake->needs_stencil_att = d->ds.stencil.test_enable;
+   bake->scissor_dyn = unbaked & (1u << TU_DYNAMIC_STATE_SCISSOR);
+   bake->blend_constants_dyn =
+      unbaked & (1u << TU_DYNAMIC_STATE_BLEND_CONSTANTS);
+
+   bake->bw_sum = pipeline->bandwidth.color_bandwidth_per_sample;
+   if (d->ds.depth.write_enable)
+      bake->bw_sum += pipeline->bandwidth.depth_cpp_per_sample;
+   if (d->ds.depth.test_enable)
+      bake->bw_sum += pipeline->bandwidth.depth_cpp_per_sample;
+   if (d->ds.stencil.test_enable)
+      bake->bw_sum += pipeline->bandwidth.stencil_cpp_per_sample * 2;
+
+   const VkPrimitiveTopology topology =
+      static_cast<VkPrimitiveTopology>(d->ia.primitive_topology);
+   if (topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST)
+      DECLINE(TU_FASTDRAW_STAGES);
+   bake->draw_initiator =
+      CP_DRAW_INDX_OFFSET_0_PRIM_TYPE(tu6_primtype(topology)) |
+      CP_DRAW_INDX_OFFSET_0_SOURCE_SELECT(DI_SRC_SEL_DMA) |
+      CP_DRAW_INDX_OFFSET_0_VIS_CULL(USE_VISIBILITY);
+   bake->pc_cntl =
+      PC_CNTL(CHIP, .primitive_restart = d->ia.primitive_restart_enable,
+              .provoking_vtx_last = d->rs.provoking_vertex ==
+                                    VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT)
+         .value;
+   const bool is_line = topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST ||
+                        topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY ||
+                        topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||
+                        topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP_WITH_ADJACENCY;
+   bake->msaa_disable =
+      is_line && d->rs.line.mode == VK_LINE_RASTERIZATION_MODE_BRESENHAM_KHR;
+
+   bake->env_id = tu_fastdraw_env_id(dev, pipeline);
+
+   {
+      uint32_t k[40];
+      unsigned n = 0;
+      memset(k, 0, sizeof(k));
+      k[n++] = 0xfa57d7a1;
+      k[n++] = bake->alpha_to_coverage | (bake->lrz_blend_status << 1) |
+               (bake->disable_fs << 8) | (bake->feedback_loops << 9);
+      STATIC_ASSERT(sizeof(d->ds) <= 36 * 4);
+      memcpy(&k[n], &d->ds, sizeof(d->ds));
+      n += 36;
+      bake->lrz_id = tu_group_intern_id(dev, k, n);
+   }
+   if (!bake->env_id || !bake->lrz_id)
+      DECLINE(TU_FASTDRAW_ALLOC);
+
+   /* The groups the generic path rebuilds from pipeline state at a draw,
+    * and the descriptor prefetch for the bindings that are written.
+    */
+   struct vk_rasterization_state rs = d->rs;
+   rs.line.width = 1.0f;
+   const bool bake_rast = unbaked & (1u << TU_DYNAMIC_STATE_RAST);
+   const bool bake_prim = !has_fsr_group &&
+                          (unbaked & (1u << TU_DYNAMIC_STATE_PRIM_MODE_SYSMEM));
+   const unsigned rast_dw = bake_rast ?
+      tu6_rast_size<CHIP>(dev, &rs, &d->vp, false, false, bake->disable_fs, false) : 0;
+   const unsigned prim_dw = bake_prim ? 2 : 0;
+   const unsigned load_dw = 4 * (2 * 2 + 2 * TU_FASTDRAW_MAX_TEX);
+   const unsigned total_dw = rast_dw + prim_dw + load_dw;
+
+   mtx_lock(&dev->pipeline_mutex);
+   VkResult result = tu_suballoc_bo_alloc(&bake->bo, &dev->pipeline_suballoc,
+                                          total_dw * 4, 64);
+   mtx_unlock(&dev->pipeline_mutex);
+   if (result != VK_SUCCESS)
+      DECLINE(TU_FASTDRAW_ALLOC);
+   bake->has_bo = true;
+
+   uint32_t *map = (uint32_t *) tu_suballoc_bo_map(&bake->bo);
+   uint32_t *scratch = (uint32_t *) malloc(total_dw * 4);
+   if (!map || !scratch) {
+      free(scratch);
+      DECLINE(TU_FASTDRAW_ALLOC);
+   }
+
+   unsigned used = 0;
+   struct tu_draw_state rast_state = {}, prim_state = {};
+   auto finish_group = [&](struct tu_cs *cs, unsigned start) {
+      const unsigned size = cs->cur - cs->start;
+      memcpy(map + start, scratch + start, size * 4);
+      struct tu_draw_state s = {};
+      s.iova = bake->bo.iova + start * 4;
+      s.size = size;
+      s.content_id = tu_group_intern_id(dev, scratch + start, size);
+      used = start + size;
+      return s;
+   };
+   auto begin_group = [&](struct tu_cs *cs, unsigned size) {
+      tu_cs_init_external(cs, dev, scratch + used, scratch + used + size,
+                          bake->bo.iova + used * 4, false);
+      tu_cs_begin(cs);
+      tu_cs_reserve_space(cs, size);
+   };
+
+   if (bake_rast) {
+      struct tu_cs cs;
+      const unsigned start = used;
+      begin_group(&cs, rast_dw);
+      tu6_emit_rast<CHIP>(&cs, &rs, &d->vp, false, false, bake->disable_fs, false);
+      rast_state = finish_group(&cs, start);
+   }
+   if (bake_prim) {
+      struct tu_cs cs;
+      const unsigned start = used;
+      bool single = false;
+      begin_group(&cs, prim_dw);
+      tu6_emit_prim_mode_sysmem<CHIP>(&cs, fs, bake->raster_order,
+                                      bake->feedback_loops, &single);
+      prim_state = finish_group(&cs, start);
+      if (single)
+         bake->single_prim = bake->rp_update = true;
+   }
+   {
+      struct tu_cs cs;
+      const unsigned start = used;
+      begin_group(&cs, load_dw);
+      const unsigned reserved = dev->physical_device->reserved_set_idx;
+      for (unsigned i = 0; i < 2; i++) {
+         VkShaderStageFlags stages =
+            pipeline->active_stages & l0->binding[i].shader_stages;
+         tu_foreach_stage (stage, stages) {
+            emit_load_state(&cs, tu6_stage2opcode(stage), ST6_UBO,
+                            tu6_stage2shadersb(stage), reserved,
+                            bake->dyn_offset_dw[i], 1);
+         }
+      }
+      for (unsigned t = 0; t < bake->n_tex; t++) {
+         const struct tu_descriptor_set_binding_layout *b =
+            &l1->binding[bake->tex[t].binding];
+         VkShaderStageFlags stages = pipeline->active_stages & b->shader_stages;
+         const unsigned offset = bake->tex[t].offset_dw;
+         tu_foreach_stage (stage, stages) {
+            emit_load_state(&cs, tu6_stage2opcode(stage), ST6_CONSTANTS,
+                            tu6_stage2texsb(stage), 1, offset, 1);
+            if (bake->tex[t].combined) {
+               emit_load_state(&cs, tu6_stage2opcode(stage), ST6_SHADER,
+                               tu6_stage2texsb(stage), 1,
+                               offset + FDL6_TEX_CONST_DWORDS, 1);
+            }
+         }
+      }
+      bake->load_state = finish_group(&cs, start);
+      /* Sent at every draw, like the pipeline's own. */
+      bake->load_state.content_id = 0;
+   }
+   free(scratch);
+
+   /* The group list, in id order. */
+   unsigned g = 0;
+#define ADD(id, st)                                                           \
+   do {                                                                       \
+      bake->gid[g] = (id);                                                    \
+      bake->gstate[g] = (st);                                                 \
+      g++;                                                                    \
+   } while (0)
+   ADD(TU_DRAW_STATE_PROGRAM_CONFIG, pipeline->program.config_state);
+   ADD(TU_DRAW_STATE_VS, pipeline->program.vs_state);
+   ADD(TU_DRAW_STATE_VS_BINNING, pipeline->program.vs_binning_state);
+   ADD(TU_DRAW_STATE_HS, pipeline->program.hs_state);
+   ADD(TU_DRAW_STATE_DS, pipeline->program.ds_state);
+   ADD(TU_DRAW_STATE_GS, pipeline->program.gs_state);
+   ADD(TU_DRAW_STATE_GS_BINNING, pipeline->program.gs_binning_state);
+   ADD(TU_DRAW_STATE_VPC, pipeline->program.vpc_state);
+   ADD(TU_DRAW_STATE_FS, pipeline->program.fs_state);
+   ADD(TU_DRAW_STATE_PRIM_MODE_GMEM, pipeline->prim_order.state_gmem);
+   u_foreach_bit (i, pipeline->set_state_mask)
+      ADD(TU_DRAW_STATE_DYNAMIC + i, pipeline->dynamic_state[i]);
+   if (bake_rast)
+      ADD(TU_DRAW_STATE_DYNAMIC + TU_DYNAMIC_STATE_RAST, rast_state);
+   if (bake_prim)
+      ADD(TU_DRAW_STATE_DYNAMIC + TU_DYNAMIC_STATE_PRIM_MODE_SYSMEM, prim_state);
+#undef ADD
+   assert(g <= TU_FASTDRAW_MAX_GROUPS);
+   bake->n_groups = g;
+
+   /* A writeable group is patched per bin and cannot be told from another
+    * by address or id.
+    */
+   for (unsigned i = 0; i < g; i++) {
+      if (bake->gstate[i].writeable)
+         DECLINE(TU_FASTDRAW_UNBAKED_GROUP);
+   }
+
+#undef DECLINE
+   bake->consts_dwords = UINT32_MAX;
+   return bake;
+}
+TU_GENX(tu_fastdraw_bake_pipeline);
+
+static void
+tu_pipeline_intern_groups(struct tu_device *dev, struct tu_pipeline *pipeline)
+{
+   const uint64_t lo = pipeline->bo.iova, hi = lo + pipeline->bo.size;
+   const char *map = (const char *) tu_suballoc_bo_map(&pipeline->bo);
+
+   struct tu_draw_state *cand[3 + TU_DYNAMIC_STATE_COUNT];
+   unsigned c = 0;
+   cand[c++] = &pipeline->program.config_state;
+   cand[c++] = &pipeline->program.vpc_state;
+   cand[c++] = &pipeline->prim_order.state_gmem;
+   for (unsigned i = 0; i < ARRAY_SIZE(pipeline->dynamic_state); i++)
+      cand[c++] = &pipeline->dynamic_state[i];
+
+   for (unsigned i = 0; i < c; i++) {
+      struct tu_draw_state *s = cand[i];
+      s->content_id = 0;
+      if (!dev->group_intern || !s->size || s->writeable || !map ||
+          s->iova < lo || s->iova + s->size * sizeof(uint32_t) > hi)
+         continue;
+
+      s->content_id = tu_group_intern_id(
+         dev, (const uint32_t *) (map + (s->iova - lo)), s->size);
    }
 }
 
@@ -4720,6 +5355,8 @@ tu_pipeline_builder_build(struct tu_pipeline_builder *builder,
       gfx_pipeline->feedback_loop_may_involve_textures =
          builder->graphics_state.feedback_loop_not_input_only;
    }
+
+   tu_pipeline_intern_groups(builder->device, *pipeline);
 
    return VK_SUCCESS;
 }

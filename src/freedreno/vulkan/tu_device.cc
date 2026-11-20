@@ -8,6 +8,7 @@
  */
 
 #include "tu_device.h"
+#include "tu_fastdraw.h"
 
 #include "drm-uapi/drm_fourcc.h"
 #include "git_sha1.h"
@@ -2832,6 +2833,7 @@ tu_device_destroy_mutexes(struct tu_device *device)
 {
    mtx_destroy(&device->bo_mutex);
    mtx_destroy(&device->pipeline_mutex);
+   tu_group_intern_finish(device);
    mtx_destroy(&device->kgsl_profiling_mutex);
    mtx_destroy(&device->event_mutex);
    mtx_destroy(&device->trace_mutex);
@@ -2953,6 +2955,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    mtx_init(&device->bo_mutex, mtx_plain);
    mtx_init(&device->pipeline_mutex, mtx_plain);
+   tu_group_intern_init(device);
    mtx_init(&device->kgsl_profiling_mutex, mtx_plain);
    mtx_init(&device->event_mutex, mtx_plain);
    mtx_init(&device->trace_mutex, mtx_plain);
@@ -3383,6 +3386,19 @@ fail_queues:
    return result;
 }
 
+/* ARMSX2: the one entry point outside the registry (tu_fastdraw.h). Every
+ * other name goes to the runtime's table.
+ */
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+tu_GetDeviceProcAddr(VkDevice _device, const char *pName)
+{
+   VK_FROM_HANDLE(tu_device, device, _device);
+
+   if (device && pName && strcmp(pName, "vkCmdDrawRunARMSX2") == 0)
+      return tu_fastdraw_entry(device);
+   return vk_device_get_proc_addr(&device->vk, pName);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 {
@@ -3390,6 +3406,34 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    if (!device)
       return;
+
+#ifdef TU_FASTDRAW_STATS
+   {
+      static const char *const names[TU_FASTDRAW_DECLINE_COUNT] = {
+         "fast", "not-graphics", "stages", "pipeline-facts", "fs-features",
+         "driver-params", "unbaked-group", "layout", "alloc", "record",
+         "cmd-dirty", "dyn-dirty", "pass", "env", "attachments", "run-abi",
+      };
+      fprintf(stderr, "TU_FASTDRAW_STATS:");
+      for (unsigned i = 0; i < TU_FASTDRAW_DECLINE_COUNT; i++)
+         fprintf(stderr, " %s=%" PRIu64, names[i], device->fastdraw_stats[i]);
+      fprintf(stderr, " side-bytes=%" PRIu64 " groups=%" PRIu64
+              " expanded=%" PRIu64 " runs=%" PRIu64 " caught-up=%" PRIu64
+              " pass-terms=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
+              device->fastdraw_side_bytes, device->fastdraw_groups,
+              device->run_expanded, device->run_calls, device->run_caught_up,
+              device->fastdraw_pass_terms[1], device->fastdraw_pass_terms[2],
+              device->fastdraw_pass_terms[3], device->fastdraw_pass_terms[4],
+              device->fastdraw_pass_terms[5], device->fastdraw_pass_terms[6]);
+#ifdef TU_FASTDRAW_CHECK
+      fprintf(stderr,
+              "TU_FASTDRAW_CHECK: %" PRIu64 " draws checked, %" PRIu64
+              " with a mismatch, %" PRIu64 " groups not readable\n",
+              device->fastdraw_checked, device->fastdraw_check_fail,
+              device->fastdraw_check_unresolved);
+#endif
+   }
+#endif
 
    tu_memory_trace_finish(device);
 

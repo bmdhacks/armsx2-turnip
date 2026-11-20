@@ -317,10 +317,53 @@ struct tu_pvtmem_bo {
 
 struct tu_virtio_device;
 
+/* ARMSX2: the run entry's measurement (tu_fastdraw.h). A measurement build
+ * defines TU_FASTDRAW_STATS (counters, printed when the device is destroyed)
+ * or TU_FASTDRAW_CHECK (every direct group is also recorded the ordinary way
+ * and the two compared; implies the counters). A shipped build defines
+ * neither, and none of it is compiled.
+ */
+#if defined(TU_FASTDRAW_CHECK) && !defined(TU_FASTDRAW_STATS)
+#define TU_FASTDRAW_STATS
+#endif
+#ifdef TU_FASTDRAW_STATS
+#define TU_FASTDRAW_COUNT(...) (__VA_ARGS__)
+#define TU_FASTDRAW_PRINT_BAKE true
+#else
+#define TU_FASTDRAW_COUNT(...) ((void) 0)
+#define TU_FASTDRAW_PRINT_BAKE false
+#endif
+
 struct tu_device
 {
    struct vk_device vk;
    struct tu_instance *instance;
+
+   /* ARMSX2: interned contents of pipeline-owned draw-state groups, keyed by
+    * their dwords (struct tu_group_key), valued by a content id that is never
+    * reused (see tu_draw_state::content_id). Entries live until the device is
+    * destroyed; there is one per distinct group content ever created.
+    */
+   mtx_t group_intern_mutex;
+   struct hash_table *group_intern;
+   uint32_t group_intern_next_id;
+
+#ifdef TU_FASTDRAW_STATS
+   /* ARMSX2 run entry (tu_fastdraw.h), measurement builds only: counters,
+    * written by the recording thread without a lock, printed when the device
+    * is destroyed.
+    */
+   uint64_t fastdraw_stats[20];
+   uint64_t fastdraw_side_bytes;
+   uint64_t fastdraw_groups;
+   uint64_t run_expanded;
+   uint64_t run_calls;
+   uint64_t run_caught_up;
+   uint64_t fastdraw_pass_terms[8];
+   uint64_t fastdraw_checked;
+   uint64_t fastdraw_check_fail;
+   uint64_t fastdraw_check_unresolved;
+#endif
 
    struct tu_queue *queues[TU_MAX_QUEUE_FAMILIES];
    int queue_count[TU_MAX_QUEUE_FAMILIES];
