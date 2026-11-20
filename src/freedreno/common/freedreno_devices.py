@@ -223,6 +223,8 @@ a6xx_gen3 = GPUProps(
         # Be safe and don't enable it either.
         # supports_linear_mipmap_threshold_in_blocks = True,
         round_robin_errata = True,
+        # ARMSX2: measured on the Adreno 650 (see freedreno_dev_info.h).
+        d32s8_kill_hang_needs_stencil = True,
     )
 
 a6xx_gen4 = GPUProps(
