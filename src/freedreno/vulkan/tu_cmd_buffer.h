@@ -1044,15 +1044,22 @@ enum tu7_rb_shadow_slot {
 };
 
 /* The register restore (shadow writes and the switch-back amble) is skipped on
- * the Adreno 740 variant with KGSL chip id 0x43050a00 (Snapdragon G3x Gen 2,
- * AYANEO Pocket S). With the restore that device is lost on the first GPU job;
- * the same build boots with it skipped. Which of the two parts the chip cannot
- * take is not known.
+ * two chips that lose the device on the first GPU job with it:
+ *  - 0x43050a00, FDA32, the Adreno 740 variant in the Snapdragon G3x Gen 2
+ *    (AYANEO Pocket S). The same build boots with the restore skipped.
+ *  - 0x07030002, FD725, in the Snapdragon 8+ Gen 1 and 7+ Gen 2. Lost the
+ *    same way on every build with the restore; not yet run with it skipped.
+ * These are the only two chips in freedreno_devices.py with the
+ * QCTDD09112208 quirk (a dummy compute dispatch at the start of every command
+ * buffer, emitted in tu_init_hw() before the amble is installed). That is a
+ * lead, not a known cause. Which of the two parts of the restore the chips
+ * cannot take is not known either.
  */
 static inline bool
 tu7_rb_restore_enabled(const struct tu_device *dev)
 {
-   return (dev->physical_device->dev_id.chip_id & 0xffffffff) != 0x43050a00;
+   uint32_t chip_id = dev->physical_device->dev_id.chip_id & 0xffffffff;
+   return chip_id != 0x43050a00 && chip_id != 0x07030002;
 }
 
 /* Record the value about to be written to a shadowed register. It goes
