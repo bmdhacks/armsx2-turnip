@@ -240,9 +240,33 @@ are back before every draw that renders, the others do not affect what ARMSX2 dr
 so no restore was added. The replays do not draw the app's own UI or present
 through SurfaceFlinger, which is where a memory-type change could still show something,
 so the build was then played in ARMSX2 on a Duo: it ran well, with no rendering
-problems reported. Only the Adreno 722 is affected by these three changes; every other
+problems reported. Only the Adreno 722 is affected by the first two changes. The
+third also applies to the Adreno 8xx parts under KGSL (next paragraph); every other
 GPU behaves as in `axfl2-005`. The record is in the ARMSX2 umbrella,
 `devs/bmdhacks/campaigns/duo-driver-next-2026-10-23/stock-diff/`.
+
+**Cached-coherent memory on Adreno 8xx (`tu: allocate uncached host-visible memory
+as cached-coherent on KGSL Adreno 8xx`).** The third change above, widened from the
+Adreno 722's chip id to the chip generation under KGSL: the uncached host-visible
+memory type is allocated cached-coherent on the 722 and on every Adreno 8xx part
+under KGSL (the 810, 829, 830, 840, X2-85 and X2-90 entries of the device table),
+wherever the kernel reports cached-coherent memory. The 8xx parts under msm and
+virtio keep the uncached type, because exported and shared buffers are allocated
+through it there and nothing has measured that. Qualcomm's Vulkan driver on the
+Adreno 830 allocates every object IO-coherent with a cached CPU mapping
+(write-through), as on the 722, so the argument is the same. Only the Adreno 830
+under KGSL (Motorola razr ultra 2025) has been measured; the other 8xx parts
+follow it without a test of their own. Measured on the 830 against `axfl3-004`,
+replaying ARMSX2 GS dumps with four interleaved repetitions in alternating order,
+each run started from a cooled phone: Sly 3 at 2x, GS-thread time per frame 10.30
+to 9.30 ms (-9.7%, same draws, passes and copies in both arms); a heavy Spider-Man
+3 scene at 2x, 12.14 to 12.01 ms (-1.1%); the same scene at 5x, where the GPU is
+the limit, frame time 21.30 to 19.55 ms (-8.2%) and GS-thread time 16.15 to 14.87
+ms (-7.9%). The same switch set through the `tu_override_uncached_as_cache_coherent`
+drirc option on `axfl3-004` gave -1.2% at 2x and -7.7% at 5x on that scene. Final
+frames were pixel-identical to `axfl3-004` on all 22 dumps of the accuracy corpus
+(4 frames each, no differing pixel). The 830 was tested by replays only, not by
+playing the app.
 
 **Wayland build switch (`wsi/wayland: let a build opt out of wl_fixes …`).** Lets
 the ARM Linux build target an older `libwayland` than the build host has. It changes
