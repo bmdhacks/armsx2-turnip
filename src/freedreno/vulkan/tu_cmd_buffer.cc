@@ -10773,6 +10773,8 @@ tu_fastdraw_entry(struct tu_device *dev)
       return (PFN_vkVoidFunction) tu_CmdDrawRunARMSX2<A6XX>;
    case A7XX:
       return (PFN_vkVoidFunction) tu_CmdDrawRunARMSX2<A7XX>;
+   case A8XX:
+      return (PFN_vkVoidFunction) tu_CmdDrawRunARMSX2<A8XX>;
    default:
       return NULL;
    }
