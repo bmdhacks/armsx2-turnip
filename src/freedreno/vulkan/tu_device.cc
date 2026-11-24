@@ -1799,19 +1799,31 @@ tu_physical_device_init(struct tu_physical_device *device,
          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
          VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
 
-      /* ARMSX2: on the Adreno 722 (KGSL chip id 0x43020100) allocate the
-       * uncached host-visible type as cached-coherent memory too, as
-       * Qualcomm's own driver allocates every object there (KGSL
-       * IOCOHERENT with a cached CPU mapping). KGSL only maps memory
-       * IO-coherent for the GPU when the CPU mapping is cached, and
-       * replaying 17 ARMSX2 GS dumps on a Retroid Pocket Duo the GPU time
-       * per frame drops by 7% (median) and up to 27% (God of War II) with
-       * identical pixels. The win comes from the application's
-       * allocations (render targets, textures, buffers); the driver's own
-       * buffers alone change nothing measurable.
+      /* ARMSX2: on the Adreno 722 (KGSL chip id 0x43020100) and on every
+       * Adreno 8xx part under KGSL allocate the uncached host-visible
+       * type as cached-coherent memory too, as Qualcomm's own driver
+       * allocates every object there (KGSL IOCOHERENT with a cached CPU
+       * mapping). KGSL only maps memory IO-coherent for the GPU when the
+       * CPU mapping is cached.
+       *
+       * Measured on the 722 (Retroid Pocket Duo): replaying 17 ARMSX2 GS
+       * dumps the GPU time per frame drops by 7% (median) and up to 27%
+       * (God of War II) with identical pixels. The win comes from the
+       * application's allocations (render targets, textures, buffers);
+       * the driver's own buffers alone change nothing measurable.
+       *
+       * Measured on the 830 (Motorola razr ultra 2025) replaying ARMSX2
+       * GS dumps: GS thread time down 9.7% on Sly 3 and 1.1% on a heavy
+       * Spider-Man 3 scene at 2x, and frame time down 8.2% on that scene
+       * at 5x, where the GPU is the limit. The 830 under KGSL is the only
+       * 8xx configuration measured. Under msm and virtio the 8xx parts
+       * keep the uncached type: exported and shared buffers are
+       * allocated through it there, and nothing measured that.
        */
       const bool a722 = (device->dev_id.chip_id & 0xffffffff) == 0x43020100;
-      if (instance->drirc.misc.override_uncached_as_cache_coherent || a722) {
+      const bool a8xx_kgsl = device->info->chip >= A8XX && is_kgsl(instance);
+      if (instance->drirc.misc.override_uncached_as_cache_coherent ||
+          a722 || a8xx_kgsl) {
           /* Retain this memory type index to override later. */
           device->preferred_uncached_as_cached_index = device->memory.type_count;
       }
