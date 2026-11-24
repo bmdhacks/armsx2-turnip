@@ -3428,9 +3428,10 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 #ifdef TU_FASTDRAW_CHECK
       fprintf(stderr,
               "TU_FASTDRAW_CHECK: %" PRIu64 " draws checked, %" PRIu64
-              " with a mismatch, %" PRIu64 " groups not readable\n",
+              " with a mismatch, %" PRIu64 " groups not readable, %" PRIu64
+              " compared by intern id\n",
               device->fastdraw_checked, device->fastdraw_check_fail,
-              device->fastdraw_check_unresolved);
+              device->fastdraw_check_unresolved, device->fastdraw_check_by_id);
 #endif
    }
 #endif

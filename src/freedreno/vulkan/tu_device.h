@@ -363,6 +363,7 @@ struct tu_device
    uint64_t fastdraw_checked;
    uint64_t fastdraw_check_fail;
    uint64_t fastdraw_check_unresolved;
+   uint64_t fastdraw_check_by_id;
 #endif
 
    struct tu_queue *queues[TU_MAX_QUEUE_FAMILIES];

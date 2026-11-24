@@ -9928,9 +9928,23 @@ tu_fastdraw_compare(struct tu_cmd_buffer *cmd, const struct tu_cs *gen_sub,
       if (g->size == 0 || tu_draw_state_same(g, f))
          continue;
       uint32_t gw[512], fw[512];
-      if (g->size > ARRAY_SIZE(gw) ||
-          !tu_fastdraw_norm(cmd, gen_sub, pipeline, gen, id, gw) ||
-          !tu_fastdraw_norm(cmd, NULL, pipeline, fast, id, fw)) {
+      const bool gen_read = g->size <= ARRAY_SIZE(gw) &&
+                            tu_fastdraw_norm(cmd, gen_sub, pipeline, gen, id, gw);
+      /* A baked group the CP still holds from an earlier pipeline's bake
+       * (same intern id, so the direct path did not send it again) lives in
+       * that pipeline's BO, which is not mapped here. Its intern id names its
+       * dwords, so the ordinary group is compared by id.
+       */
+      if (gen_read && f->content_id && id != TU_DRAW_STATE_CONST &&
+          id != TU_DRAW_STATE_DESC_SETS &&
+          !tu_fastdraw_words(cmd, NULL, pipeline, f->iova, f->size * 4)) {
+         dev->fastdraw_check_by_id++;
+         if (tu_group_intern_id(dev, gw, g->size) != f->content_id)
+            MISMATCH("group %u: ordinary dwords differ from the held group (id %u)",
+                     id, f->content_id);
+         continue;
+      }
+      if (!gen_read || !tu_fastdraw_norm(cmd, NULL, pipeline, fast, id, fw)) {
          dev->fastdraw_check_unresolved++;
          if (dev->fastdraw_check_unresolved < 10)
             fprintf(stderr, "TU_FASTDRAW_CHECK: group %u not readable\n", id);
