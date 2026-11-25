@@ -218,7 +218,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$BUILD_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-            --title "Custom Turnip driver for ARMSX2 (Adreno 6xx/7xx) $BUILD_TAG" \
+            --title "Custom Turnip driver for ARMSX2 (Adreno 6xx/7xx/8xx) $BUILD_TAG" \
             --notes-file notes.md \
             "packs/turnip-$BUILD_TAG-aarch64.tar.gz" "packs/turnip-$BUILD_TAG-aarch64.tar.gz.sha256" \
             "packs/turnip-$BUILD_TAG-android.zip" "packs/turnip-$BUILD_TAG-android.zip.sha256"
